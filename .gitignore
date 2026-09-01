@@ -1,0 +1,36 @@
+# Secrets
+.env
+.env.*
+credentials.json
+auth.json
+git_credentials
+secrets/
+
+# Runtime
+*.pid
+*.tmp
+*.lock
+*.log
+opencode_runtime/
+.colab/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+dist/
+build/
+*.egg-info/
+
+# Node
+node_modules/
+
+# Colab
+/content/
+drive/

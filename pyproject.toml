@@ -1,0 +1,19 @@
+[project]
+name = "opencode-colab-workstation"
+version = "4.0.0"
+description = "OpenCode + Google Colab + Drive + NVIDIA NIM - Workstation persistente"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["ruff>=0.8", "pyright>=1.1"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
