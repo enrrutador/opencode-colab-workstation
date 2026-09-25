@@ -2,19 +2,19 @@
 
 Flow:
   1. Detect Kaggle
-  2. Init local dirs (/kaggle/working/opencode_cloud)
-  3. Load Kaggle Secrets
-  4. Identify Dataset
-  5. Download + recover (or FRESH)
+  2. Init local dirs
+  3. Load secrets
+  4. Resolve Dataset
+  5. Download + recover
   6. Restore runtime paths
-  7. Ensure Node + OpenCode (idempotent)
-  8. Configure NVIDIA NIM (env-only secrets)
-  9. Start OpenCode Web locally
- 10. Start Watchdog with REAL restart
- 11. Local checkpoints; remote via CheckpointManager → Kaggle Dataset only
+  7. Ensure Node + OpenCode
+  8. Configure NVIDIA NIM
+  9. Start OpenCode Web
+ 10. Start Watchdog (process restart only)
+ 11. Start CheckpointScheduler (automatic local/remote persistence)
+ 12. Shutdown: stop scheduler → final Dataset checkpoint
 
-GitHub is optional code versioning. It is NOT triggered by checkpoints.
-Call sync_to_remote explicitly when versioning code is desired.
+GitHub is optional code versioning and is NEVER triggered by checkpoints.
 """
 
 from __future__ import annotations
@@ -22,14 +22,12 @@ from __future__ import annotations
 import json
 import os
 import signal
+import threading
 from pathlib import Path
 from typing import Optional
 
 from opencode_cloud.checkpoint import CheckpointManager, CheckpointPolicy, PublishReason
-from opencode_cloud.github_sync import (
-    configure_remote,
-    init_repo,
-)
+from opencode_cloud.github_sync import configure_remote, init_repo
 from opencode_cloud.nvidia import fetch_models, select_model
 from opencode_cloud.opencode import (
     ensure_node,
@@ -37,12 +35,9 @@ from opencode_cloud.opencode import (
     start_opencode_web,
     write_opencode_config,
 )
-from opencode_cloud.persistence import (
-    KagglePersistence,
-    RecoveryStatus,
-    default_store,
-)
+from opencode_cloud.persistence import KagglePersistence, RecoveryStatus, default_store
 from opencode_cloud.runtime import ensure_dirs, get_paths, is_kaggle
+from opencode_cloud.scheduler import CheckpointScheduler
 from opencode_cloud.secrets import load_required_secret, load_secret
 from opencode_cloud.watchdog import Watchdog
 from opencode_kaggle.kaggle import resolve_dataset_id
@@ -73,10 +68,8 @@ def bootstrap(
     _log(f"Working: {paths.working}")
     _log(f"Cloud root: {paths.cloud_root}")
 
-    # --- Secrets (Kaggle Secrets / env) ---
     nvidia_key = load_required_secret("NVIDIA_API_KEY")
     github_repo = load_secret("GITHUB_REPO")
-    # GITHUB_TOKEN loaded only if needed for optional explicit sync; not used by checkpoint
     _ = load_secret("GITHUB_TOKEN")
 
     try:
@@ -86,7 +79,6 @@ def bootstrap(
 
     persistence = KagglePersistence(did, paths.working)
 
-    # --- Recovery ---
     recovery = persistence.recover_into(store)
     _log(f"Recovery: {recovery.status.value} — {recovery.message}")
 
@@ -98,28 +90,23 @@ def bootstrap(
             "ok": False,
         }
 
-    # Restore into OpenCode runtime paths
     store.restore_to(
         opencode_data=paths.opencode_data,
         opencode_config=paths.opencode_config,
         workspace=paths.workspace,
     )
 
-    # --- Tooling (idempotent) ---
     node_ver = ensure_node()
     _log(f"Node: {node_ver}")
     opencode_bin = ensure_opencode()
     _log(f"OpenCode: {opencode_bin}")
 
-    # --- NVIDIA ---
     models = fetch_models(nvidia_key)
     preferred = ""
     meta_path = store.metadata_dir / "nvidia.json"
     if meta_path.exists():
         try:
-            preferred = json.loads(meta_path.read_text(encoding="utf-8")).get(
-                "model", ""
-            )
+            preferred = json.loads(meta_path.read_text(encoding="utf-8")).get("model", "")
         except Exception:
             preferred = ""
     selected_model = select_model(models, preferred)
@@ -136,7 +123,6 @@ def bootstrap(
     write_opencode_config(cfg_path, model=selected_model)
     _log(f"Config: {cfg_path}")
 
-    # --- Optional GitHub remote setup (versioning only; no auto-push) ---
     if github_repo:
         try:
             init_repo(paths.workspace)
@@ -145,7 +131,6 @@ def bootstrap(
         except Exception as e:
             _log(f"GitHub setup skipped: {e}")
 
-    # --- Start OpenCode ---
     env = os.environ.copy()
     env["NVIDIA_API_KEY"] = nvidia_key
     for v in (
@@ -172,9 +157,9 @@ def bootstrap(
     _log(f"OpenCode PID {state['proc'].pid}")
     _log(describe_opencode_web_access(opencode_port))
 
-    # --- Checkpoint manager (Dataset only — never GitHub) ---
     ckpt = CheckpointManager(policy or CheckpointPolicy())
     ckpt.set_baseline_fingerprint(paths.workspace)
+    checkpoint_lock = threading.Lock()
 
     def local_checkpoint(extra: Optional[dict] = None) -> dict:
         meta = store.save_local(
@@ -188,12 +173,7 @@ def bootstrap(
         return meta
 
     def remote_checkpoint(reason: PublishReason, notes: str = "") -> dict:
-        """Publish workstation state to Kaggle Dataset only.
-
-        Does NOT push to GitHub. Use opencode_cloud.github_sync.sync_to_remote
-        explicitly when code versioning is desired.
-        """
-        # Observe workspace for significant-change gating (ignored for EXPLICIT/SHUTDOWN)
+        """Publish to Kaggle Dataset only (no GitHub)."""
         if reason not in (PublishReason.EXPLICIT, PublishReason.SHUTDOWN):
             ckpt.observe_workspace(paths.workspace)
 
@@ -204,7 +184,6 @@ def bootstrap(
         if not should:
             return {"published": False, "reason": decided.value}
 
-        # Ensure structure + marker before publish
         store.ensure_structure()
         store.write_marker({"phase": decided.value})
         validation = store.validate_workstation()
@@ -223,7 +202,6 @@ def bootstrap(
             ckpt.record_remote_publish()
         return {"published": ok, "message": msg, "reason": decided.value}
 
-    # Initial local save only. First remote publish only after valid workstation.
     local_checkpoint({"phase": "bootstrap"})
     if recovery.status == RecoveryStatus.FRESH_WORKSTATION:
         validation = store.validate_workstation()
@@ -232,7 +210,6 @@ def bootstrap(
         else:
             _log(f"Skipping initial publish: {validation.get('message')}")
 
-    # --- Watchdog: REAL restart only (no Dataset publish, no git) ---
     def restart_and_track():
         _log("Watchdog: restarting OpenCode...")
         new_p = start_proc()
@@ -248,10 +225,34 @@ def bootstrap(
     watchdog.set_process(state["proc"])
     watchdog.start()
 
+    def observe():
+        return ckpt.observe_workspace(paths.workspace)
+
+    def do_local():
+        return local_checkpoint({"trigger": "scheduler"})
+
+    def do_remote(reason: PublishReason):
+        return remote_checkpoint(reason)
+
+    scheduler = CheckpointScheduler(
+        ckpt,
+        observe_fn=observe,
+        local_fn=do_local,
+        remote_fn=do_remote,
+        lock=checkpoint_lock,
+        interval=ckpt.policy.local_interval,
+    )
+    scheduler.start()
+    _log(
+        f"CheckpointScheduler started "
+        f"(local every {ckpt.policy.local_interval}s, "
+        f"remote min {ckpt.policy.min_publish_interval}s)"
+    )
+
     def _on_shutdown(signum=None, frame=None):
-        _log("Shutdown: remote checkpoint (Dataset only)...")
+        _log("Shutdown: stop scheduler + final Dataset checkpoint...")
         try:
-            remote_checkpoint(PublishReason.SHUTDOWN, notes="shutdown")
+            scheduler.shutdown_checkpoint()
         except Exception as e:
             _log(f"Shutdown checkpoint error: {e}")
 
@@ -261,7 +262,7 @@ def bootstrap(
     except Exception:
         pass
 
-    info = {
+    return {
         "ok": True,
         "runtime": "kaggle",
         "recovery": recovery.status.value,
@@ -274,5 +275,6 @@ def bootstrap(
         "web_access": describe_opencode_web_access(opencode_port),
         "checkpoint_state": ckpt.get_state(),
         "watchdog": watchdog.status(),
+        "scheduler": scheduler.status(),
+        "rpo_target_seconds": ckpt.policy.min_publish_interval,
     }
-    return info
