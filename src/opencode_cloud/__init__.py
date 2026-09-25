@@ -1,7 +1,25 @@
-"""opencode-cloud-workstation - OpenCode Cloud Workstation core.
+"""opencode-cloud-workstation — platform-agnostic core.
 
-Platform-agnostic core logic for bootstrapping, persisting,
-checkpointing, and recovering an OpenCode workstation on ephemeral runtimes.
+Persistent OpenCode workstation for ephemeral cloud runtimes.
 """
 
 __version__ = "5.0.0"
+
+from .checkpoint import CheckpointManager, CheckpointPolicy, PublishReason
+from .persistence import (
+    KagglePersistence,
+    PersistentStore,
+    RecoveryResult,
+    RecoveryStatus,
+)
+
+__all__ = [
+    "CheckpointManager",
+    "CheckpointPolicy",
+    "PublishReason",
+    "KagglePersistence",
+    "PersistentStore",
+    "RecoveryResult",
+    "RecoveryStatus",
+    "__version__",
+]
