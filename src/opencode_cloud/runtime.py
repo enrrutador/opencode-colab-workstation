@@ -1,31 +1,20 @@
 """Runtime detection and path management for ephemeral cloud runtimes.
 
-This module provides a clean abstraction over the host runtime environment.
-It is intentionally free of any Colab-specific dependencies.
+Free of any Colab-specific dependencies.
 """
 
 from __future__ import annotations
 
 import os
 import platform
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 
 @dataclass
 class RuntimePaths:
-    """Paths inside an ephemeral runtime.
-
-    Attributes:
-        working: Runtime working directory (ephemeral, may disappear).
-        home: User home directory inside the runtime.
-        opencode_data: OpenCode state directory (~/.local/share/opencode).
-        opencode_config: OpenCode config directory (~/.config/opencode).
-        workspace: Local workspace directory (ephemeral).
-        logs: Local logs directory (ephemeral).
-        temp: Temporary files directory.
-    """
+    """Paths inside an ephemeral runtime."""
 
     working: Path
     home: Path
@@ -34,11 +23,7 @@ class RuntimePaths:
     workspace: Path
     logs: Path
     temp: Path
-
-
-def _env_path(name: str, default: Path) -> Path:
-    val = os.environ.get(name)
-    return Path(val) if val else default
+    cloud_root: Path  # /kaggle/working/opencode_cloud
 
 
 def detect_runtime() -> str:
@@ -47,20 +32,17 @@ def detect_runtime() -> str:
     Returns:
         'kaggle' if running in Kaggle, otherwise 'local'.
     """
-    if os.path.exists("/kaggle") or os.environ.get("KAGGLE_KERNEL_EXECUTION") or os.environ.get("KAGGLE_CONTAINER_TYPE"):
+    if (
+        os.path.exists("/kaggle")
+        or os.environ.get("KAGGLE_KERNEL_EXECUTION")
+        or os.environ.get("KAGGLE_CONTAINER_TYPE")
+    ):
         return "kaggle"
     return "local"
 
 
 def get_paths(runtime: Optional[str] = None) -> RuntimePaths:
-    """Build RuntimePaths for the given runtime.
-
-    Args:
-        runtime: Runtime identifier. Auto-detected when None.
-
-    Returns:
-        RuntimePaths instance.
-    """
+    """Build RuntimePaths for the given runtime."""
     runtime = runtime or detect_runtime()
     home = Path.home()
 
@@ -69,11 +51,12 @@ def get_paths(runtime: Optional[str] = None) -> RuntimePaths:
     else:
         working = Path(os.environ.get("OPENCODE_CLOUD_WORKDIR", "/tmp/opencode-cloud"))
 
+    cloud_root = working / "opencode_cloud"
     opencode_data = home / ".local" / "share" / "opencode"
     opencode_config = home / ".config" / "opencode"
-    workspace = working / "opencode_workspace"
-    logs = working / "opencode_logs"
-    temp = working / "opencode_tmp"
+    workspace = cloud_root / "workspace"
+    logs = cloud_root / "logs"
+    temp = cloud_root / "tmp"
 
     return RuntimePaths(
         working=working,
@@ -83,6 +66,7 @@ def get_paths(runtime: Optional[str] = None) -> RuntimePaths:
         workspace=workspace,
         logs=logs,
         temp=temp,
+        cloud_root=cloud_root,
     )
 
 
@@ -90,6 +74,7 @@ def ensure_dirs(paths: RuntimePaths) -> None:
     """Create runtime directories idempotently."""
     for d in (
         paths.working,
+        paths.cloud_root,
         paths.workspace,
         paths.logs,
         paths.temp,
@@ -108,7 +93,6 @@ def is_local() -> bool:
 
 
 def platform_info() -> dict:
-    """Return a small dict of platform facts."""
     return {
         "runtime": detect_runtime(),
         "platform": platform.system(),
