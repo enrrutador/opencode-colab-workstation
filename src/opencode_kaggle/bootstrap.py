@@ -184,7 +184,7 @@ def bootstrap(
         )
         if not info.available:
             access_info["status"] = (
-                "OPENCODE_RUNNING_ACCESS_UNAVAILABLE"
+                "OPENCODE_RUNNING_PROXY_UNAVAILABLE"
                 if info.opencode_listening
                 else "OPENCODE_NOT_RUNNING"
             )
@@ -296,7 +296,7 @@ def bootstrap(
 
     status = "READY"
     if not access_info.get("available") and enable_access_layer:
-        status = "OPENCODE_RUNNING_ACCESS_UNAVAILABLE"
+        status = "OPENCODE_RUNNING_PROXY_UNAVAILABLE"
 
     return {
         "ok": True,
