@@ -1,12 +1,16 @@
-"""Access layer for OpenCode Web inside Kaggle (and local testing).
+"""Kaggle Jupyter Proxy access for OpenCode Web.
 
-Primary mechanism (Kaggle native):
-  jupyter_server.serverapp.list_running_servers() → base_url
-  → https://kkb-production.jupyter-proxy.kaggle.net/k/<kernel>/<token>/proxy/proxy/<PORT>
+Primary (only) mechanism:
+  list_running_servers() → base_url →
+  https://kkb-production.jupyter-proxy.kaggle.net/k/<kernel>/<token>/proxy/proxy/<PORT>
 
-Pattern used by official Kaggle Agents course notebooks (ADK web UI).
-JWT/token in the path is ephemeral — never write to Dataset/Git/checkpoints;
-redact in logs.
+Semantics:
+  opencode_listening  — TCP 127.0.0.1:PORT accepts connections
+  proxy_url_generated — URL string built from Jupyter base_url
+  proxy_reachable     — HTTP GET to the public proxy URL got a response
+  available           — proxy_reachable (NOT merely URL constructed)
+
+JWT/token is ephemeral: show once to user; never Dataset/checkpoints/Git/logs.
 """
 
 from __future__ import annotations
@@ -14,7 +18,9 @@ from __future__ import annotations
 import re
 import socket
 import time
-from dataclasses import dataclass
+import urllib.error
+import urllib.request
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from .ports import DEFAULT_OPENCODE_PORT, get_opencode_port
@@ -29,24 +35,31 @@ _TOKEN_SEGMENT = re.compile(r"/k/(\d+)/([^/]+)/")
 class AccessInfo:
     available: bool
     url: Optional[str] = None
-    authentication: str = "jupyter_session"
-    provider: str = "none"
-    status: str = "unavailable"
-    message: str = ""
+    url_redacted: Optional[str] = None
     local_port: int = DEFAULT_OPENCODE_PORT
     opencode_listening: bool = False
-    url_redacted: Optional[str] = None
+    proxy_url_generated: bool = False
+    proxy_reachable: bool = False
+    http_status: Optional[int] = None
+    authentication: str = "jupyter_session"
+    provider: str = "kaggle_jupyter_proxy"
+    status: str = "unavailable"
+    message: str = ""
+    details: dict = field(default_factory=dict)
 
     def to_dict(self, *, include_url: bool = True) -> dict:
         d = {
             "available": self.available,
+            "url_redacted": self.url_redacted or redact_proxy_url(self.url),
+            "local_port": self.local_port,
+            "opencode_listening": self.opencode_listening,
+            "proxy_url_generated": self.proxy_url_generated,
+            "proxy_reachable": self.proxy_reachable,
+            "http_status": self.http_status,
             "authentication": self.authentication,
             "provider": self.provider,
             "status": self.status,
             "message": self.message,
-            "local_port": self.local_port,
-            "opencode_listening": self.opencode_listening,
-            "url_redacted": self.url_redacted or redact_proxy_url(self.url),
         }
         if include_url:
             d["url"] = self.url
@@ -108,19 +121,52 @@ def build_kaggle_proxy_url(
     return f"{host}/k/{kernel}/{token}/proxy/proxy/{int(port)}"
 
 
-class KaggleProxyAccess:
-    """Native Kaggle Jupyter Proxy access detector (no external tunnel)."""
+def probe_proxy_http(
+    url: str,
+    *,
+    timeout: float = 15.0,
+    user_agent: str = "opencode-cloud-workstation/5.0-proxy-probe",
+) -> tuple[bool, Optional[int], str]:
+    req = urllib.request.Request(
+        url, method="GET", headers={"User-Agent": user_agent, "Accept": "*/*"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            status = getattr(resp, "status", None) or resp.getcode()
+            try:
+                resp.read(4096)
+            except Exception:
+                pass
+            if status is not None and int(status) < 500:
+                return True, int(status), f"proxy HTTP {status}"
+            return False, int(status) if status else None, f"proxy HTTP error {status}"
+    except urllib.error.HTTPError as e:
+        code = e.code
+        if code < 500:
+            return True, code, f"proxy HTTP {code}"
+        return False, code, f"proxy HTTP error {code}"
+    except urllib.error.URLError as e:
+        reason = type(e.reason).__name__ if getattr(e, "reason", None) else type(e).__name__
+        return False, None, f"proxy unreachable: {reason}"
+    except Exception as e:
+        return False, None, f"proxy probe failed: {type(e).__name__}"
 
+
+class KaggleProxyAccess:
     def __init__(
         self,
         port: Optional[int] = None,
         *,
         proxy_host: str = KAGGLE_JUPYTER_PROXY_HOST,
         servers_fn=None,
+        probe_fn=None,
+        skip_http_probe: bool = False,
     ):
         self.port = int(port if port is not None else get_opencode_port())
         self.proxy_host = proxy_host
         self._servers_fn = servers_fn or list_jupyter_servers
+        self._probe_fn = probe_fn or probe_proxy_http
+        self.skip_http_probe = skip_http_probe
 
     def resolve(self) -> AccessInfo:
         listening = wait_for_port("127.0.0.1", self.port, timeout=5.0)
@@ -128,10 +174,9 @@ class KaggleProxyAccess:
             return AccessInfo(
                 available=False,
                 status="opencode_not_listening",
-                message=f"Nothing is listening on 127.0.0.1:{self.port}",
+                message=f"Nothing listening on 127.0.0.1:{self.port}",
                 local_port=self.port,
                 opencode_listening=False,
-                provider="kaggle_jupyter_proxy",
             )
 
         servers = self._servers_fn()
@@ -139,13 +184,9 @@ class KaggleProxyAccess:
             return AccessInfo(
                 available=False,
                 status="jupyter_server_not_found",
-                message=(
-                    "No running Jupyter server found via list_running_servers(). "
-                    "Kaggle proxy URL cannot be built outside a notebook runtime."
-                ),
+                message="No Jupyter server from list_running_servers(); cannot build proxy URL",
                 local_port=self.port,
                 opencode_listening=True,
-                provider="kaggle_jupyter_proxy",
             )
 
         base_url = str(servers[0].get("base_url") or "")
@@ -153,74 +194,63 @@ class KaggleProxyAccess:
         if not kernel or not token:
             return AccessInfo(
                 available=False,
-                status="base_url_unparseable",
+                status="proxy_url_generation_failed",
                 message="Could not parse kernel/token from Jupyter base_url",
                 local_port=self.port,
                 opencode_listening=True,
-                provider="kaggle_jupyter_proxy",
             )
 
         url = build_kaggle_proxy_url(
-            kernel=kernel,
-            token=token,
-            port=self.port,
-            proxy_host=self.proxy_host,
+            kernel=kernel, token=token, port=self.port, proxy_host=self.proxy_host
         )
+        redacted = redact_proxy_url(url)
+
+        if self.skip_http_probe:
+            return AccessInfo(
+                available=False,
+                url=url,
+                url_redacted=redacted,
+                local_port=self.port,
+                opencode_listening=True,
+                proxy_url_generated=True,
+                proxy_reachable=False,
+                status="proxy_url_generated_not_probed",
+                message="Proxy URL generated but HTTP probe was skipped (not accessible)",
+            )
+
+        reachable, http_status, reason = self._probe_fn(url)
+        if not reachable:
+            return AccessInfo(
+                available=False,
+                url=url,
+                url_redacted=redacted,
+                local_port=self.port,
+                opencode_listening=True,
+                proxy_url_generated=True,
+                proxy_reachable=False,
+                http_status=http_status,
+                status="proxy_unreachable" if http_status is None else "proxy_http_error",
+                message=reason,
+            )
+
         return AccessInfo(
             available=True,
             url=url,
-            url_redacted=redact_proxy_url(url),
-            status="ready",
-            message=(
-                "Kaggle Jupyter Proxy URL built from running server base_url. "
-                "Open it while this Kaggle session is active. URL is ephemeral."
-            ),
+            url_redacted=redacted,
             local_port=self.port,
             opencode_listening=True,
-            provider="kaggle_jupyter_proxy",
-            authentication="jupyter_session",
+            proxy_url_generated=True,
+            proxy_reachable=True,
+            http_status=http_status,
+            status="opencode_web_ready",
+            message=(
+                "Proxy HTTP probe succeeded. Open URL while this Kaggle session is active. "
+                "WebSocket/streaming not verified by this probe alone."
+            ),
         )
 
 
-def resolve_web_access(
-    port: Optional[int] = None,
-    *,
-    prefer_kaggle_proxy: bool = True,
-    allow_cloudflare_fallback: bool = False,
-    tunnel_token: Optional[str] = None,
-) -> AccessInfo:
-    port = int(port if port is not None else get_opencode_port())
-    if prefer_kaggle_proxy:
-        info = KaggleProxyAccess(port).resolve()
-        if info.available or not allow_cloudflare_fallback:
-            return info
-    if allow_cloudflare_fallback:
-        try:
-            from .access_cloudflare import CloudflareAccessLayer
-
-            return CloudflareAccessLayer(port, tunnel_token=tunnel_token).start()
-        except Exception as e:
-            return AccessInfo(
-                available=False,
-                status="fallback_failed",
-                message=f"Proxy unavailable and Cloudflare fallback failed: {type(e).__name__}",
-                local_port=port,
-                provider="none",
-            )
-    return AccessInfo(
-        available=False,
-        status="access_unavailable",
-        message="No access provider succeeded",
-        local_port=port,
-    )
-
-
-def format_workstation_banner(
-    *,
-    recovery: str,
-    opencode_status: str,
-    access: AccessInfo,
-) -> str:
+def format_workstation_banner(* , recovery: str, opencode_status: str, access: AccessInfo) -> str:
     lines = [
         "========================================",
         "OpenCode Workstation",
@@ -228,19 +258,23 @@ def format_workstation_banner(
         f"Workspace: {recovery}",
         f"OpenCode: {opencode_status}",
     ]
-    if access.available and access.url:
+    if access.available and access.url and access.proxy_reachable:
         lines.append("OpenCode Web: ACCESSIBLE")
         lines.append("Abrí esta URL desde tu teléfono:")
         lines.append(access.url)
-        lines.append("Importante: esta URL pertenece al runtime actual.")
-        lines.append("Si el runtime se reinicia, se generará una nueva URL.")
+        lines.append("Importante: URL del runtime actual; no es permanente.")
+        lines.append("Nota: el probe HTTP pasó; WebSocket/streaming requiere prueba manual.")
+    elif access.opencode_listening and access.proxy_url_generated and not access.proxy_reachable:
+        lines.append("OpenCode Web: NOT_ACCESSIBLE")
+        lines.append("OpenCode corre en el runtime; la URL del proxy se generó")
+        lines.append("pero el HTTP al proxy falló o no se pudo verificar.")
+        lines.append(f"Motivo: {access.status} — {access.message}")
     elif access.opencode_listening:
         lines.append("OpenCode Web: NOT_ACCESSIBLE")
-        lines.append("OpenCode está corriendo dentro del runtime,")
-        lines.append("pero no se pudo construir la URL del proxy Kaggle.")
+        lines.append("OpenCode corre localmente; no se pudo generar/validar proxy.")
         lines.append(f"Motivo: {access.status}")
     else:
-        lines.append("OpenCode Web: NOT_RUNNING")
+        lines.append("OpenCode: NOT_RUNNING")
         lines.append(f"Motivo: {access.status}")
     lines.append("========================================")
     return "\n".join(lines)

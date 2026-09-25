@@ -26,10 +26,11 @@ def get_runtime_paths() -> dict:
 
 
 def describe_opencode_web_access(port: int = 4096) -> str:
-    """Legacy string description. Prefer AccessLayer / bootstrap web_access dict."""
+    """Legacy string. Prefer AccessInfo from KaggleProxyAccess.resolve()."""
     return (
-        f"OpenCode listens on 127.0.0.1:{port} inside the Kaggle runtime. "
-        "Kaggle does not publish this port. bootstrap() starts a Cloudflare Tunnel "
-        "(cloudflared) and returns web_access.url when available. "
-        "Protect OpenCode with the OPENCODE_SERVER_PASSWORD Kaggle Secret."
+        f"OpenCode listens on 127.0.0.1:{port}. "
+        "External access uses Kaggle Jupyter Proxy "
+        "(kkb-production.jupyter-proxy.kaggle.net/.../proxy/proxy/<PORT>). "
+        "bootstrap() builds the URL from list_running_servers() and HTTP-probes it "
+        "before marking ACCESSIBLE."
     )

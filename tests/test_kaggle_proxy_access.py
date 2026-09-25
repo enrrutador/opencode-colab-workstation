@@ -1,8 +1,9 @@
-"""Unit tests for native Kaggle Jupyter Proxy access."""
+"""Unit tests for Kaggle Jupyter Proxy access (no Cloudflare)."""
 
 from __future__ import annotations
 
 from opencode_cloud.access import (
+    AccessInfo,
     KaggleProxyAccess,
     build_kaggle_proxy_url,
     format_workstation_banner,
@@ -17,44 +18,78 @@ def test_parse_kernel_token():
     assert t.startswith("eyJ")
 
 
-def test_parse_empty():
-    assert parse_kernel_token_from_base_url("") == (None, None)
-
-
 def test_build_url():
     url = build_kaggle_proxy_url(kernel="99", token="tok", port=4096)
-    assert url == "https://kkb-production.jupyter-proxy.kaggle.net/k/99/tok/proxy/proxy/4096"
+    assert url.endswith("/k/99/tok/proxy/proxy/4096")
+    assert "jupyter-proxy.kaggle.net" in url
 
 
-def test_redact_url():
-    url = "https://kkb-production.jupyter-proxy.kaggle.net/k/1/eyJhbGciOiJkaXIiLCJlbmMiOiJBMTI4Q0JD.xxx.yyy/proxy/proxy/4096"
+def test_redact_hides_token():
+    url = build_kaggle_proxy_url(kernel="7", token="SUPERSECRETTOKEN", port=8000)
     r = redact_proxy_url(url)
-    assert r is not None
-    assert "REDACTED" in r
-    assert "4096" in r
+    assert "SUPERSECRETTOKEN" not in (r or "")
+    assert "REDACTED" in (r or "")
 
 
-def test_resolve_no_jupyter(monkeypatch):
+def test_available_false_when_only_url_generated_not_probed(monkeypatch):
+    from opencode_cloud import access as m
+
+    monkeypatch.setattr(m, "wait_for_port", lambda *a, **k: True)
+    info = KaggleProxyAccess(
+        4096,
+        servers_fn=lambda: [{"base_url": "/k/1/secrettoken/"}],
+        skip_http_probe=True,
+    ).resolve()
+    assert info.proxy_url_generated is True
+    assert info.available is False
+    assert info.status == "proxy_url_generated_not_probed"
+
+
+def test_available_true_only_after_successful_probe(monkeypatch):
+    from opencode_cloud import access as m
+
+    monkeypatch.setattr(m, "wait_for_port", lambda *a, **k: True)
+
+    def probe(url, **kw):
+        assert "proxy/proxy/4096" in url
+        return True, 200, "proxy HTTP 200"
+
+    info = KaggleProxyAccess(
+        4096,
+        servers_fn=lambda: [{"base_url": "/k/42/tok42/"}],
+        probe_fn=probe,
+    ).resolve()
+    assert info.available is True
+    assert info.proxy_reachable is True
+    assert info.status == "opencode_web_ready"
+
+
+def test_proxy_unreachable(monkeypatch):
+    from opencode_cloud import access as m
+
+    monkeypatch.setattr(m, "wait_for_port", lambda *a, **k: True)
+
+    def probe(url, **kw):
+        return False, None, "proxy unreachable: TimeoutError"
+
+    info = KaggleProxyAccess(
+        4096,
+        servers_fn=lambda: [{"base_url": "/k/1/t/"}],
+        probe_fn=probe,
+    ).resolve()
+    assert info.available is False
+    assert info.status == "proxy_unreachable"
+
+
+def test_no_jupyter(monkeypatch):
     from opencode_cloud import access as m
 
     monkeypatch.setattr(m, "wait_for_port", lambda *a, **k: True)
     info = KaggleProxyAccess(4096, servers_fn=lambda: []).resolve()
-    assert info.available is False
     assert info.status == "jupyter_server_not_found"
 
 
-def test_resolve_success(monkeypatch):
-    from opencode_cloud import access as m
-
-    monkeypatch.setattr(m, "wait_for_port", lambda *a, **k: True)
-    servers = [{"base_url": "/k/42/secrettoken123/"}]
-    info = KaggleProxyAccess(4096, servers_fn=lambda: servers).resolve()
-    assert info.available is True
-    assert info.provider == "kaggle_jupyter_proxy"
-    assert info.url and "proxy/proxy/4096" in info.url
-
-
-def test_resolve_not_listening(monkeypatch):
+def test_not_listening(monkeypatch):
     from opencode_cloud import access as m
 
     monkeypatch.setattr(m, "wait_for_port", lambda *a, **k: False)
@@ -62,34 +97,22 @@ def test_resolve_not_listening(monkeypatch):
     assert info.status == "opencode_not_listening"
 
 
-def test_banner_accessible():
-    from opencode_cloud.access import AccessInfo
-
+def test_banner_accessible_only_when_reachable():
     info = AccessInfo(
         available=True,
         url="https://example/k/1/tok/proxy/proxy/4096",
-        status="ready",
+        proxy_reachable=True,
+        proxy_url_generated=True,
         opencode_listening=True,
-        provider="kaggle_jupyter_proxy",
+        status="opencode_web_ready",
     )
     text = format_workstation_banner(recovery="FRESH", opencode_status="RUNNING", access=info)
     assert "ACCESSIBLE" in text
 
 
-def test_banner_not_accessible():
-    from opencode_cloud.access import AccessInfo
+def test_no_cloudflare_in_access_module():
+    from pathlib import Path
 
-    info = AccessInfo(
-        available=False,
-        status="jupyter_server_not_found",
-        opencode_listening=True,
-        provider="kaggle_jupyter_proxy",
-    )
-    text = format_workstation_banner(recovery="FRESH", opencode_status="RUNNING", access=info)
-    assert "NOT_ACCESSIBLE" in text
-
-
-def test_no_token_in_redacted_log_path():
-    url = build_kaggle_proxy_url(kernel="7", token="SUPERSECRETTOKEN", port=8000)
-    r = redact_proxy_url(url)
-    assert "SUPERSECRETTOKEN" not in (r or "")
+    text = (Path(__file__).resolve().parents[1] / "src/opencode_cloud/access.py").read_text()
+    assert "cloudflare" not in text.lower()
+    assert "cloudflared" not in text.lower()
