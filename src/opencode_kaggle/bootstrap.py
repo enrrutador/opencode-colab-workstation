@@ -1,20 +1,7 @@
 """Top-level bootstrap for OpenCode Cloud Workstation on Kaggle.
 
-Flow:
-  1. Detect Kaggle
-  2. Init local dirs
-  3. Load secrets
-  4. Resolve Dataset
-  5. Download + recover
-  6. Restore runtime paths
-  7. Ensure Node + OpenCode
-  8. Configure NVIDIA NIM
-  9. Start OpenCode Web
- 10. Start Watchdog (process restart only)
- 11. Start CheckpointScheduler (automatic local/remote persistence)
- 12. Shutdown: stop scheduler → final Dataset checkpoint
-
-GitHub is optional code versioning and is NEVER triggered by checkpoints.
+Phone flow:
+  Kaggle notebook → bootstrap() → OpenCode + Cloudflare Tunnel → URL in result
 """
 
 from __future__ import annotations
@@ -26,6 +13,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
+from opencode_cloud.access import AccessLayer, wait_for_port
 from opencode_cloud.checkpoint import CheckpointManager, CheckpointPolicy, PublishReason
 from opencode_cloud.github_sync import configure_remote, init_repo
 from opencode_cloud.nvidia import fetch_models, select_model
@@ -41,7 +29,6 @@ from opencode_cloud.scheduler import CheckpointScheduler
 from opencode_cloud.secrets import load_required_secret, load_secret
 from opencode_cloud.watchdog import Watchdog
 from opencode_kaggle.kaggle import resolve_dataset_id
-from opencode_kaggle.runtime import describe_opencode_web_access
 
 
 def _log(msg: str) -> None:
@@ -52,8 +39,10 @@ def bootstrap(
     dataset_id: Optional[str] = None,
     opencode_port: int = 4096,
     policy: Optional[CheckpointPolicy] = None,
+    *,
+    enable_access_layer: bool = True,
 ) -> dict:
-    """Bootstrap the workstation. Returns runtime info dict."""
+    """Bootstrap the workstation. Returns runtime info including web_access."""
     if not is_kaggle():
         if os.environ.get("OPENCODE_CLOUD_ALLOW_LOCAL") != "1":
             raise RuntimeError(
@@ -71,6 +60,9 @@ def bootstrap(
     nvidia_key = load_required_secret("NVIDIA_API_KEY")
     github_repo = load_secret("GITHUB_REPO")
     _ = load_secret("GITHUB_TOKEN")
+    tunnel_token = load_secret("CLOUDFLARE_TUNNEL_TOKEN") or ""
+    server_password = load_secret("OPENCODE_SERVER_PASSWORD") or ""
+    server_username = load_secret("OPENCODE_SERVER_USERNAME") or "opencode"
 
     try:
         did = resolve_dataset_id(dataset_id)
@@ -84,10 +76,11 @@ def bootstrap(
 
     if recovery.status == RecoveryStatus.RESTORE_FAILED:
         return {
+            "ok": False,
+            "status": "RESTORE_FAILED",
             "runtime": "kaggle",
             "recovery": recovery.status.value,
             "message": recovery.message,
-            "ok": False,
         }
 
     store.restore_to(
@@ -133,14 +126,15 @@ def bootstrap(
 
     env = os.environ.copy()
     env["NVIDIA_API_KEY"] = nvidia_key
-    for v in (
-        "OPENCODE_SERVER_PASSWORD",
-        "OPENCODE_SERVER_USERNAME",
-        "OPENCODE_SERVER_AUTH",
-        "OPENCODE_PASSWORD",
-        "OPENCODE_USERNAME",
-    ):
-        env.pop(v, None)
+    if server_password:
+        env["OPENCODE_SERVER_PASSWORD"] = server_password
+        env["OPENCODE_SERVER_USERNAME"] = server_username
+        _log("OpenCode basic auth: enabled (password from Secrets, not printed)")
+    elif enable_access_layer:
+        _log(
+            "WARNING: OPENCODE_SERVER_PASSWORD secret not set. "
+            "External URL would be unauthenticated — set OPENCODE_SERVER_PASSWORD in Kaggle Secrets."
+        )
 
     log_path = paths.logs / "opencode-web.log"
 
@@ -153,9 +147,48 @@ def bootstrap(
             log_path=log_path,
         )
 
-    state = {"proc": start_proc()}
+    state = {"proc": start_proc(), "access": None}
     _log(f"OpenCode PID {state['proc'].pid}")
-    _log(describe_opencode_web_access(opencode_port))
+
+    if not wait_for_port("127.0.0.1", opencode_port, timeout=90.0):
+        return {
+            "ok": False,
+            "status": "BOOTSTRAP_FAILED",
+            "runtime": "kaggle",
+            "recovery": recovery.status.value,
+            "message": f"OpenCode process started but port {opencode_port} is not listening",
+            "opencode_pid": state["proc"].pid,
+        }
+
+    _log(f"OpenCode is listening on 127.0.0.1:{opencode_port}")
+
+    access_info = {
+        "available": False,
+        "url": None,
+        "status": "disabled",
+        "message": "Access layer disabled",
+        "local_port": opencode_port,
+        "opencode_listening": True,
+        "authentication": "opencode_basic_auth" if server_password else "none",
+    }
+
+    if enable_access_layer:
+        access = AccessLayer(
+            opencode_port,
+            tunnel_token=tunnel_token or None,
+            log_path=paths.logs / "cloudflared.log",
+        )
+        state["access"] = access
+        info = access.start(wait_url_timeout=60.0)
+        access_info = info.to_dict()
+        if info.available and info.url:
+            _log(f"Phone access URL: {info.url}")
+            _log("Open that URL on your phone. Use OpenCode username/password from Secrets.")
+        elif info.available:
+            _log(f"Access layer: {info.status} — {info.message}")
+        else:
+            _log(f"Access layer unavailable: {info.status} — {info.message}")
+            access_info["status"] = "OPENCODE_RUNNING_ACCESS_UNAVAILABLE"
 
     ckpt = CheckpointManager(policy or CheckpointPolicy())
     ckpt.set_baseline_fingerprint(paths.workspace)
@@ -173,17 +206,14 @@ def bootstrap(
         return meta
 
     def remote_checkpoint(reason: PublishReason, notes: str = "") -> dict:
-        """Publish to Kaggle Dataset only (no GitHub)."""
         if reason not in (PublishReason.EXPLICIT, PublishReason.SHUTDOWN):
             ckpt.observe_workspace(paths.workspace)
-
         should, decided = ckpt.should_publish_remote(reason=reason)
         if reason in (PublishReason.EXPLICIT, PublishReason.SHUTDOWN):
             should = True
             decided = reason
         if not should:
             return {"published": False, "reason": decided.value}
-
         store.ensure_structure()
         store.write_marker({"phase": decided.value})
         validation = store.validate_workstation()
@@ -193,7 +223,6 @@ def bootstrap(
                 "reason": "invalid_workstation",
                 "message": validation.get("message"),
             }
-
         local_checkpoint({"trigger": decided.value})
         ok, msg = persistence.publish_from_store(
             store, version_notes=notes or f"checkpoint:{decided.value}"
@@ -214,7 +243,10 @@ def bootstrap(
         _log("Watchdog: restarting OpenCode...")
         new_p = start_proc()
         state["proc"] = new_p
-        _log(f"Watchdog: new PID {new_p.pid}")
+        if wait_for_port("127.0.0.1", opencode_port, timeout=60.0):
+            _log(f"Watchdog: OpenCode listening again (PID {new_p.pid})")
+        else:
+            _log("Watchdog: OpenCode restarted but port not listening yet")
         return new_p
 
     watchdog = Watchdog(
@@ -225,20 +257,11 @@ def bootstrap(
     watchdog.set_process(state["proc"])
     watchdog.start()
 
-    def observe():
-        return ckpt.observe_workspace(paths.workspace)
-
-    def do_local():
-        return local_checkpoint({"trigger": "scheduler"})
-
-    def do_remote(reason: PublishReason):
-        return remote_checkpoint(reason)
-
     scheduler = CheckpointScheduler(
         ckpt,
-        observe_fn=observe,
-        local_fn=do_local,
-        remote_fn=do_remote,
+        observe_fn=lambda: ckpt.observe_workspace(paths.workspace),
+        local_fn=lambda: local_checkpoint({"trigger": "scheduler"}),
+        remote_fn=lambda reason: remote_checkpoint(reason),
         lock=checkpoint_lock,
         interval=ckpt.policy.local_interval,
     )
@@ -250,11 +273,16 @@ def bootstrap(
     )
 
     def _on_shutdown(signum=None, frame=None):
-        _log("Shutdown: stop scheduler + final Dataset checkpoint...")
+        _log("Shutdown: checkpoint → stop access → done")
         try:
             scheduler.shutdown_checkpoint()
         except Exception as e:
             _log(f"Shutdown checkpoint error: {e}")
+        try:
+            if state.get("access"):
+                state["access"].stop()
+        except Exception as e:
+            _log(f"Access stop error: {e}")
 
     try:
         signal.signal(signal.SIGTERM, _on_shutdown)
@@ -262,8 +290,13 @@ def bootstrap(
     except Exception:
         pass
 
+    status = "READY"
+    if not access_info.get("available") and enable_access_layer:
+        status = "OPENCODE_RUNNING_ACCESS_UNAVAILABLE"
+
     return {
         "ok": True,
+        "status": status,
         "runtime": "kaggle",
         "recovery": recovery.status.value,
         "workspace": str(paths.workspace),
@@ -272,7 +305,7 @@ def bootstrap(
         "opencode_pid": state["proc"].pid,
         "model": selected_model,
         "dataset_id": did,
-        "web_access": describe_opencode_web_access(opencode_port),
+        "web_access": access_info,
         "checkpoint_state": ckpt.get_state(),
         "watchdog": watchdog.status(),
         "scheduler": scheduler.status(),
