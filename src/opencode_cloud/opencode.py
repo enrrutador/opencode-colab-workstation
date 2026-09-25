@@ -1,47 +1,95 @@
 """OpenCode bootstrap and management.
 
 Idempotent:
-- ensure_node(): if Node exists → skip; else install (or raise if not possible)
+- ensure_node(): if Node exists → skip; else install via explicit local script
 - ensure_opencode(): if OpenCode exists → skip; else install via npm
 
 Config is merged incrementally; NVIDIA provider is preserved/updated without
 wiping unrelated provider blocks when possible.
 Secrets are never written into the config file — only env references.
+
+Security:
+- No shell flag on subprocess
+- No shell string invocation
+- No remote pipe-to-shell install
+- NodeSource setup is downloaded to a temp file, then executed as a local file
 """
 
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
+NODE_SETUP_URL = "https://deb.nodesource.com/setup_22.x"
+
 
 def ensure_node() -> str:
-    """Ensure Node.js is available. Idempotent. Returns version string."""
+    """Ensure Node.js is available. Idempotent. Returns version string.
+
+    Installation strategy (in order):
+    1. Use existing node binary if present
+    2. Download NodeSource setup script to a temp file (HTTP status checked)
+    3. Execute that local file with explicit argv (no pipe to shell)
+    4. apt-get install nodejs with explicit argv
+    5. Delete the temp script
+    """
     result = subprocess.run(
         ["node", "--version"], capture_output=True, text=True
     )
     if result.returncode == 0:
         return result.stdout.strip()
 
+    # Prefer preinstalled node on Kaggle when available; only then install.
+    setup_path: Optional[Path] = None
     try:
+        # Download setup script explicitly — never remote-pipe install
+        req = urllib.request.Request(
+            NODE_SETUP_URL,
+            headers={"User-Agent": "opencode-cloud-workstation/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            if getattr(resp, "status", 200) not in (200, 301, 302):
+                raise RuntimeError(f"NodeSource HTTP status {getattr(resp, 'status', '?')}")
+            body = resp.read()
+
+        fd, tmp_name = tempfile.mkstemp(suffix=".sh", prefix="nodesource_")
+        os.close(fd)
+        setup_path = Path(tmp_name)
+        setup_path.write_bytes(body)
+        setup_path.chmod(0o700)
+
+        # Execute local file with explicit arguments — not a remote pipe
         subprocess.run(
-            ["bash", "-c", "curl -fsSL https://deb.nodesource.com/setup_22.x | bash -"],
+            ["bash", str(setup_path)],
             check=True,
             capture_output=True,
+            timeout=180,
         )
         subprocess.run(
             ["apt-get", "install", "-y", "nodejs"],
             check=True,
             capture_output=True,
+            timeout=300,
         )
     except Exception as e:
         raise RuntimeError(
             "Node.js is required but not installed and auto-install failed. "
-            f"Install Node.js manually. Error: {e}"
+            "Install Node.js manually (e.g. apt-get install -y nodejs). "
+            f"Error: {type(e).__name__}"
         ) from e
+    finally:
+        if setup_path is not None and setup_path.exists():
+            try:
+                setup_path.unlink()
+            except OSError:
+                pass
 
     result = subprocess.run(
         ["node", "--version"], capture_output=True, text=True
@@ -61,6 +109,7 @@ def ensure_opencode() -> str:
         ["npm", "install", "-g", "opencode-ai"],
         check=True,
         capture_output=True,
+        timeout=300,
     )
     bin_path = shutil.which("opencode")
     if not bin_path:
