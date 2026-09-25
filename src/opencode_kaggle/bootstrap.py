@@ -281,18 +281,46 @@ def bootstrap(
         f"remote min {ckpt.policy.min_publish_interval}s)"
     )
 
+    _shutdown_done = {"ok": False}
+
     def _on_shutdown(signum=None, frame=None):
-        _log("Shutdown: final Dataset checkpoint")
+        """Idempotent shutdown: stop watchdog → final checkpoint → stop scheduler → stop OpenCode."""
+        if _shutdown_done["ok"]:
+            return
+        _shutdown_done["ok"] = True
+        _log("Shutdown: begin")
+        try:
+            watchdog.stop()
+        except Exception as e:
+            _log(f"Shutdown: watchdog stop error: {type(e).__name__}")
         try:
             scheduler.shutdown_checkpoint()
         except Exception as e:
-            _log(f"Shutdown checkpoint error: {e}")
+            _log(f"Shutdown: checkpoint error: {type(e).__name__}")
+        try:
+            scheduler.stop()
+        except Exception as e:
+            _log(f"Shutdown: scheduler stop error: {type(e).__name__}")
+        try:
+            proc = state.get("proc")
+            if proc is not None and proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=10)
+                except Exception:
+                    proc.kill()
+                _log("Shutdown: OpenCode process stopped")
+        except Exception as e:
+            _log(f"Shutdown: OpenCode stop error: {type(e).__name__}")
+        _log("Shutdown: done")
 
     try:
         signal.signal(signal.SIGTERM, _on_shutdown)
         signal.signal(signal.SIGINT, _on_shutdown)
     except Exception:
         pass
+
+    state["shutdown"] = _on_shutdown
 
     status = "READY"
     if not access_info.get("available") and enable_access_layer:
@@ -314,4 +342,5 @@ def bootstrap(
         "watchdog": watchdog.status(),
         "scheduler": scheduler.status(),
         "rpo_target_seconds": ckpt.policy.min_publish_interval,
+        "shutdown": state["shutdown"],
     }
