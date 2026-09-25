@@ -2,35 +2,13 @@
 
 Two levels:
 
-1. Local checkpoint (cheap, frequent)
-   - Saved under /kaggle/working/opencode_cloud/
-   - Does NOT create a Dataset version
-
-2. Remote checkpoint (expensive, policy-gated)
-   - Publishes to Kaggle Dataset via KagglePersistence ONLY
-   - Cooldown minimum 5 minutes between normal publishes
-   - Immediate on: significant change + cooldown, shutdown, explicit request
-   - NEVER triggers GitHub sync (GitHub is separate versioning)
-
-Significant change detection
-----------------------------
-A "significant change" is detected by comparing a workspace fingerprint
-(file count + total size + sample of relative paths/mtimes) against the
-last recorded fingerprint.
-
-What counts as significant:
-- New, deleted, or renamed files under workspace/
-- Content growth beyond a small threshold (default: any size delta)
-
-What does NOT force publish by itself:
-- Unchanged workspace (fingerprint match)
-- Watchdog process restarts
-- Mere passage of time without changes
+1. Local checkpoint (cheap, frequent) under /kaggle/working/opencode_cloud/
+2. Remote checkpoint (policy-gated) → Kaggle Dataset only (never GitHub)
 
 CheckpointManager decides WHETHER to publish.
+CheckpointScheduler runs the periodic observe → local → remote loop.
 KagglePersistence executes the publish.
 Watchdog does NOT publish.
-GitHubSync is NOT invoked from checkpoint paths.
 """
 
 from __future__ import annotations
@@ -43,7 +21,10 @@ from pathlib import Path
 from typing import Optional
 
 
-MIN_PUBLISH_INTERVAL_SECONDS = 300  # 5 minutes
+# Policy defaults (RPO target under normal operation)
+LOCAL_CHECKPOINT_INTERVAL = 60  # seconds between local observations/saves
+REMOTE_CHECKPOINT_MIN_INTERVAL = 300  # 5 minutes between normal remote publishes
+MIN_PUBLISH_INTERVAL_SECONDS = REMOTE_CHECKPOINT_MIN_INTERVAL  # alias
 
 
 class PublishReason(str, Enum):
@@ -56,10 +37,12 @@ class PublishReason(str, Enum):
 
 @dataclass
 class CheckpointPolicy:
-    min_publish_interval: int = MIN_PUBLISH_INTERVAL_SECONDS
+    local_interval: int = LOCAL_CHECKPOINT_INTERVAL
+    min_publish_interval: int = REMOTE_CHECKPOINT_MIN_INTERVAL
     always_on_shutdown: bool = True
     always_on_explicit: bool = True
-    always_on_recovery: bool = False  # recovery is download, not publish by default
+    always_on_recovery: bool = False
+    max_fingerprint_files: int = 50_000  # hard cap; overflow → incomplete
 
 
 @dataclass
@@ -70,34 +53,61 @@ class CheckpointState:
     pending_significant_changes: int = 0
     remote_pending: bool = False
     last_workspace_fingerprint: str = ""
+    fingerprint_incomplete: bool = False
 
 
-def workspace_fingerprint(workspace: Path, *, max_files: int = 500) -> str:
-    """Compute a stable fingerprint of workspace content.
+@dataclass
+class FingerprintResult:
+    digest: str
+    file_count: int
+    incomplete: bool
+    truncated_at: int = 0
 
-    Uses relative path, size, and mtime for up to max_files entries.
-    Deterministic and cheap — no full file hashing of large blobs.
+
+def workspace_fingerprint(
+    workspace: Path,
+    *,
+    max_files: int = 50_000,
+) -> FingerprintResult:
+    """Fingerprint workspace using path + size + mtime_ns for every regular file.
+
+    Detects: create, delete, rename, size change, content rewrite (via mtime_ns).
+    If file count exceeds max_files, marks incomplete=True (never silently
+    treats a partial scan as a full representation).
     """
     workspace = Path(workspace)
     if not workspace.exists():
-        return "empty"
+        return FingerprintResult(digest="empty", file_count=0, incomplete=False)
+
     entries: list[str] = []
+    truncated = False
     try:
         for p in sorted(workspace.rglob("*")):
-            if not p.is_file():
+            if not p.is_file() or p.is_symlink():
                 continue
             try:
                 st = p.stat()
                 rel = p.relative_to(workspace).as_posix()
-                entries.append(f"{rel}:{st.st_size}:{int(st.st_mtime)}")
+                mtime_ns = getattr(st, "st_mtime_ns", int(st.st_mtime * 1e9))
+                entries.append(f"{rel}:{st.st_size}:{mtime_ns}")
             except OSError:
                 continue
             if len(entries) >= max_files:
+                truncated = True
                 break
     except OSError:
-        return "unreadable"
+        return FingerprintResult(digest="unreadable", file_count=0, incomplete=True)
+
     raw = "\n".join(entries).encode("utf-8", errors="replace")
-    return hashlib.sha256(raw).hexdigest()
+    digest = hashlib.sha256(raw).hexdigest()
+    if truncated:
+        digest = hashlib.sha256((digest + f":truncated:{max_files}").encode()).hexdigest()
+    return FingerprintResult(
+        digest=digest,
+        file_count=len(entries),
+        incomplete=truncated,
+        truncated_at=max_files if truncated else 0,
+    )
 
 
 class CheckpointManager:
@@ -108,36 +118,34 @@ class CheckpointManager:
         self.state = CheckpointState()
 
     def record_local_checkpoint(self) -> None:
-        """Mark that a local checkpoint was taken."""
         self.state.last_local_checkpoint = time.time()
 
     def mark_significant_change(self) -> None:
-        """Mark that significant work happened; remote publish may be warranted."""
         self.state.pending_significant_changes += 1
         self.state.remote_pending = True
 
     def observe_workspace(self, workspace: Path) -> bool:
-        """Compare workspace fingerprint to last known.
-
-        Returns True if a significant change was detected and recorded.
-        Call this before deciding on remote publish for COOLDOWN_AND_CHANGES.
-        """
-        fp = workspace_fingerprint(workspace)
+        """Compare fingerprint; return True if significant change recorded."""
+        result = workspace_fingerprint(
+            workspace, max_files=self.policy.max_fingerprint_files
+        )
+        self.state.fingerprint_incomplete = result.incomplete
         if not self.state.last_workspace_fingerprint:
-            # First observation — establish baseline, not a "change"
-            self.state.last_workspace_fingerprint = fp
+            self.state.last_workspace_fingerprint = result.digest
             return False
-        if fp != self.state.last_workspace_fingerprint:
-            self.state.last_workspace_fingerprint = fp
+        if result.digest != self.state.last_workspace_fingerprint:
+            self.state.last_workspace_fingerprint = result.digest
             self.mark_significant_change()
             return True
         return False
 
     def set_baseline_fingerprint(self, workspace: Path) -> str:
-        """Set fingerprint baseline without counting as a change."""
-        fp = workspace_fingerprint(workspace)
-        self.state.last_workspace_fingerprint = fp
-        return fp
+        result = workspace_fingerprint(
+            workspace, max_files=self.policy.max_fingerprint_files
+        )
+        self.state.last_workspace_fingerprint = result.digest
+        self.state.fingerprint_incomplete = result.incomplete
+        return result.digest
 
     def should_publish_remote(
         self,
@@ -146,13 +154,6 @@ class CheckpointManager:
         significant_changes: Optional[int] = None,
         now: Optional[float] = None,
     ) -> tuple[bool, PublishReason]:
-        """Decide whether a remote publish should happen now.
-
-        Returns (should_publish, reason).
-
-        EXPLICIT and SHUTDOWN bypass cooldown.
-        COOLDOWN_AND_CHANGES requires pending changes AND elapsed >= interval.
-        """
         clock = now if now is not None else time.time()
         changes = (
             significant_changes
@@ -162,24 +163,19 @@ class CheckpointManager:
 
         if reason == PublishReason.EXPLICIT and self.policy.always_on_explicit:
             return True, PublishReason.EXPLICIT
-
         if reason == PublishReason.SHUTDOWN and self.policy.always_on_shutdown:
             return True, PublishReason.SHUTDOWN
-
         if reason == PublishReason.RECOVERY and self.policy.always_on_recovery:
             return True, PublishReason.RECOVERY
 
         elapsed = clock - self.state.last_remote_publish
         if changes >= 1 and elapsed >= self.policy.min_publish_interval:
             return True, PublishReason.COOLDOWN_AND_CHANGES
-
         if self.state.remote_pending and elapsed >= self.policy.min_publish_interval:
             return True, PublishReason.COOLDOWN_AND_CHANGES
-
         return False, PublishReason.NONE
 
     def record_remote_publish(self, *, now: Optional[float] = None) -> None:
-        """Call after a successful remote publish."""
         clock = now if now is not None else time.time()
         self.state.last_remote_publish = clock
         self.state.remote_publish_count += 1
@@ -194,6 +190,8 @@ class CheckpointManager:
             "pending_significant_changes": self.state.pending_significant_changes,
             "remote_pending": self.state.remote_pending,
             "min_publish_interval": self.policy.min_publish_interval,
+            "local_interval": self.policy.local_interval,
+            "fingerprint_incomplete": self.state.fingerprint_incomplete,
             "last_workspace_fingerprint": self.state.last_workspace_fingerprint[:16]
             if self.state.last_workspace_fingerprint
             else "",
