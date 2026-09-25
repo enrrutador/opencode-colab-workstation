@@ -1,17 +1,18 @@
-# Secrets
+# Secrets — never commit
 .env
 .env.*
 credentials.json
 auth.json
 git_credentials
 secrets/
-
-# Runtime
-*.pid
 *.tmp
+
+# Runtime / local state
+*.pid
 *.lock
 *.log
 opencode_runtime/
+opencode_cloud/
 
 # OS
 .DS_Store
@@ -26,10 +27,13 @@ venv/
 dist/
 build/
 *.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
 # Node
 node_modules/
 
-# Kaggle
-/kaggle/input/
-
+# Editor
+.idea/
+.vscode/

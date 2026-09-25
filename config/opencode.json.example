@@ -1,7 +1,10 @@
 {
   "$schema": "https://opencode.ai/config.json",
   "permission": "allow",
-  "compaction": {"auto": true, "prune": false},
+  "compaction": {
+    "auto": true,
+    "prune": false
+  },
   "provider": {
     "nvidia": {
       "name": "NVIDIA NIM",
