@@ -17,13 +17,11 @@ from typing import Optional
 
 
 def ensure_node() -> None:
-    """Ensure Node.js is available. Installs Node 22 via Nodesource if missing."""
+    """Ensure Node.js is available."""
     result = subprocess.run(["node", "--version"], capture_output=True, text=True)
     if result.returncode == 0:
         return
-    print("Node.js not found. Installing Node.js 22...")
-    subprocess.run("curl -fsSL https://deb.nodesource.com/setup_22.x | bash -", shell=True, check=True)
-    subprocess.run("apt-get install -y nodejs", shell=True, check=True)
+    raise RuntimeError("Node.js is required but not installed in this runtime. Install Node.js before bootstrapping.")
 
 
 def ensure_opencode() -> str:
@@ -31,8 +29,8 @@ def ensure_opencode() -> str:
     bin_path = shutil.which("opencode")
     if bin_path:
         return bin_path
-    print("Installing opencode-ai globally...")
-    subprocess.run("npm install -g opencode-ai", shell=True, check=True)
+    # Install via npm using list arguments, no shell
+    subprocess.run(["npm", "install", "-g", "opencode-ai"], check=True)
     bin_path = shutil.which("opencode")
     if not bin_path:
         raise RuntimeError("OpenCode installation failed")

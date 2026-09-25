@@ -45,18 +45,10 @@ def detect_runtime() -> str:
     """Detect the current runtime platform.
 
     Returns:
-        One of: 'kaggle', 'colab', 'local', 'unknown'.
+        'kaggle' if running in Kaggle, otherwise 'local'.
     """
     if os.path.exists("/kaggle") or os.environ.get("KAGGLE_KERNEL_EXECUTION") or os.environ.get("KAGGLE_CONTAINER_TYPE"):
         return "kaggle"
-    try:
-        import google.colab.utils  # noqa: F401
-
-        return "colab"
-    except ImportError:
-        pass
-    if os.environ.get("COLAB_RELEASE") or os.path.exists("/content"):
-        return "colab"
     return "local"
 
 
@@ -74,8 +66,6 @@ def get_paths(runtime: Optional[str] = None) -> RuntimePaths:
 
     if runtime == "kaggle":
         working = Path("/kaggle/working")
-    elif runtime == "colab":
-        working = Path("/content")
     else:
         working = Path(os.environ.get("OPENCODE_CLOUD_WORKDIR", "/tmp/opencode-cloud"))
 
@@ -111,10 +101,6 @@ def ensure_dirs(paths: RuntimePaths) -> None:
 
 def is_kaggle() -> bool:
     return detect_runtime() == "kaggle"
-
-
-def is_colab() -> bool:
-    return detect_runtime() == "colab"
 
 
 def is_local() -> bool:

@@ -38,25 +38,26 @@ class EnvSecrets(SecretsManager):
 class KaggleSecrets(SecretsManager):
     """Read secrets from Kaggle Secrets.
 
-    Kaggle exposes secrets via the `kagglehub` library or via environment
-    variables injected by the Kaggle kernel. This implementation prefers
-    the official `kaggle.secrets` interface when available.
+    Uses kaggle_secrets.UserSecretsClient which is the official Kaggle
+    interface inside notebooks. Falls back to environment variables.
     """
 
-    def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
-        # Prefer Kaggle's native secrets module if available.
+    def __init__(self):
+        self._client = None
         try:
-            from kaggle.secrets import SecretsClient  # type: ignore
+            from kaggle_secrets import UserSecretsClient  # type: ignore
 
-            client = SecretsClient()
+            self._client = UserSecretsClient()
+        except Exception:
+            self._client = None
+
+    def get(self, key: str, default: Optional[str] = None) -> Optional[str]:
+        if self._client:
             try:
-                return client.get_secret(key)
+                return self._client.get_secret(key)
             except Exception:
                 pass
-        except Exception:
-            pass
-
-        # Fallback: environment variable (Kaggle also injects some secrets).
+        # Fallback: environment variable
         return os.environ.get(key, default)
 
 

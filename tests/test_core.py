@@ -8,7 +8,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 def test_runtime_detection():
     from opencode_cloud.runtime import detect_runtime
     rt = detect_runtime()
-    assert rt in ("kaggle", "colab", "local", "unknown")
+    assert rt in ("kaggle", "local")
     print("runtime detection ok:", rt)
 
 
