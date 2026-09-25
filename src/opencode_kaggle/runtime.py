@@ -26,11 +26,10 @@ def get_runtime_paths() -> dict:
 
 
 def describe_opencode_web_access(port: int = 4096) -> str:
-    """Document access limitations. Does not invent public URLs or tunnels."""
+    """Legacy string description. Prefer AccessLayer / bootstrap web_access dict."""
     return (
-        f"OpenCode Web is running locally inside the Kaggle runtime at "
-        f"http://127.0.0.1:{port} (bound to 0.0.0.0:{port}). "
-        "Kaggle does not provide an official public URL or proxy for arbitrary "
-        "kernel ports. Access is local to the runtime; use the Kaggle notebook "
-        "environment or an external tunnel you control if remote access is required."
+        f"OpenCode listens on 127.0.0.1:{port} inside the Kaggle runtime. "
+        "Kaggle does not publish this port. bootstrap() starts a Cloudflare Tunnel "
+        "(cloudflared) and returns web_access.url when available. "
+        "Protect OpenCode with the OPENCODE_SERVER_PASSWORD Kaggle Secret."
     )
