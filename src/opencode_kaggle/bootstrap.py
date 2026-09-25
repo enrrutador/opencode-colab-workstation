@@ -11,9 +11,10 @@ Flow:
   8. Configure NVIDIA NIM (env-only secrets)
   9. Start OpenCode Web locally
  10. Start Watchdog with REAL restart
- 11. Local checkpoints; remote via CheckpointManager policy
+ 11. Local checkpoints; remote via CheckpointManager → Kaggle Dataset only
 
-GitHub is optional code versioning with temporary credentials only.
+GitHub is optional code versioning. It is NOT triggered by checkpoints.
+Call sync_to_remote explicitly when versioning code is desired.
 """
 
 from __future__ import annotations
@@ -28,7 +29,6 @@ from opencode_cloud.checkpoint import CheckpointManager, CheckpointPolicy, Publi
 from opencode_cloud.github_sync import (
     configure_remote,
     init_repo,
-    sync_to_remote,
 )
 from opencode_cloud.nvidia import fetch_models, select_model
 from opencode_cloud.opencode import (
@@ -39,7 +39,6 @@ from opencode_cloud.opencode import (
 )
 from opencode_cloud.persistence import (
     KagglePersistence,
-    PersistentStore,
     RecoveryStatus,
     default_store,
 )
@@ -61,7 +60,6 @@ def bootstrap(
 ) -> dict:
     """Bootstrap the workstation. Returns runtime info dict."""
     if not is_kaggle():
-        # Allow local dry-run when OPENCODE_CLOUD_ALLOW_LOCAL=1
         if os.environ.get("OPENCODE_CLOUD_ALLOW_LOCAL") != "1":
             raise RuntimeError(
                 "This bootstrap targets Kaggle. "
@@ -78,8 +76,9 @@ def bootstrap(
     # --- Secrets (Kaggle Secrets / env) ---
     nvidia_key = load_required_secret("NVIDIA_API_KEY")
     github_repo = load_secret("GITHUB_REPO")
-    github_token = load_secret("GITHUB_TOKEN")
-    # Dataset id is configuration, not necessarily a secret
+    # GITHUB_TOKEN loaded only if needed for optional explicit sync; not used by checkpoint
+    _ = load_secret("GITHUB_TOKEN")
+
     try:
         did = resolve_dataset_id(dataset_id)
     except Exception as e:
@@ -92,7 +91,6 @@ def bootstrap(
     _log(f"Recovery: {recovery.status.value} — {recovery.message}")
 
     if recovery.status == RecoveryStatus.RESTORE_FAILED:
-        # Do not pretend success
         return {
             "runtime": "kaggle",
             "recovery": recovery.status.value,
@@ -138,12 +136,12 @@ def bootstrap(
     write_opencode_config(cfg_path, model=selected_model)
     _log(f"Config: {cfg_path}")
 
-    # --- Optional GitHub (temp credentials only) ---
+    # --- Optional GitHub remote setup (versioning only; no auto-push) ---
     if github_repo:
         try:
             init_repo(paths.workspace)
             configure_remote(paths.workspace, github_repo)
-            _log(f"GitHub remote: {github_repo}")
+            _log(f"GitHub remote configured: {github_repo}")
         except Exception as e:
             _log(f"GitHub setup skipped: {e}")
 
@@ -174,8 +172,9 @@ def bootstrap(
     _log(f"OpenCode PID {state['proc'].pid}")
     _log(describe_opencode_web_access(opencode_port))
 
-    # --- Checkpoint manager ---
+    # --- Checkpoint manager (Dataset only — never GitHub) ---
     ckpt = CheckpointManager(policy or CheckpointPolicy())
+    ckpt.set_baseline_fingerprint(paths.workspace)
 
     def local_checkpoint(extra: Optional[dict] = None) -> dict:
         meta = store.save_local(
@@ -185,9 +184,19 @@ def bootstrap(
             extra_meta=extra,
         )
         ckpt.record_local_checkpoint()
+        ckpt.set_baseline_fingerprint(paths.workspace)
         return meta
 
     def remote_checkpoint(reason: PublishReason, notes: str = "") -> dict:
+        """Publish workstation state to Kaggle Dataset only.
+
+        Does NOT push to GitHub. Use opencode_cloud.github_sync.sync_to_remote
+        explicitly when code versioning is desired.
+        """
+        # Observe workspace for significant-change gating (ignored for EXPLICIT/SHUTDOWN)
+        if reason not in (PublishReason.EXPLICIT, PublishReason.SHUTDOWN):
+            ckpt.observe_workspace(paths.workspace)
+
         should, decided = ckpt.should_publish_remote(reason=reason)
         if reason in (PublishReason.EXPLICIT, PublishReason.SHUTDOWN):
             should = True
@@ -195,28 +204,33 @@ def bootstrap(
         if not should:
             return {"published": False, "reason": decided.value}
 
+        # Ensure structure + marker before publish
+        store.ensure_structure()
+        store.write_marker({"phase": decided.value})
+        validation = store.validate_workstation()
+        if not validation.get("ok"):
+            return {
+                "published": False,
+                "reason": "invalid_workstation",
+                "message": validation.get("message"),
+            }
+
         local_checkpoint({"trigger": decided.value})
         ok, msg = persistence.publish_from_store(
             store, version_notes=notes or f"checkpoint:{decided.value}"
         )
         if ok:
             ckpt.record_remote_publish()
-            if github_repo and github_token:
-                try:
-                    sync_to_remote(
-                        paths.workspace,
-                        f"OpenCode checkpoint ({decided.value})",
-                        token=github_token,
-                    )
-                except Exception as e:
-                    _log(f"GitHub sync warning: {e}")
         return {"published": ok, "message": msg, "reason": decided.value}
 
-    # Initial local save
+    # Initial local save only. First remote publish only after valid workstation.
     local_checkpoint({"phase": "bootstrap"})
     if recovery.status == RecoveryStatus.FRESH_WORKSTATION:
-        # First remote publish so Dataset exists for next runtime
-        remote_checkpoint(PublishReason.EXPLICIT, notes="initial workstation")
+        validation = store.validate_workstation()
+        if validation.get("ok"):
+            remote_checkpoint(PublishReason.EXPLICIT, notes="initial workstation")
+        else:
+            _log(f"Skipping initial publish: {validation.get('message')}")
 
     # --- Watchdog: REAL restart only (no Dataset publish, no git) ---
     def restart_and_track():
@@ -234,9 +248,8 @@ def bootstrap(
     watchdog.set_process(state["proc"])
     watchdog.start()
 
-    # Shutdown hook → remote checkpoint
     def _on_shutdown(signum=None, frame=None):
-        _log("Shutdown: remote checkpoint...")
+        _log("Shutdown: remote checkpoint (Dataset only)...")
         try:
             remote_checkpoint(PublishReason.SHUTDOWN, notes="shutdown")
         except Exception as e:
