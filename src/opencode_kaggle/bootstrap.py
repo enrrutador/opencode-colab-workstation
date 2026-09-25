@@ -1,7 +1,7 @@
 """Top-level bootstrap for OpenCode Cloud Workstation on Kaggle.
 
 Phone flow:
-  Kaggle notebook → bootstrap() → OpenCode + Kaggle Jupyter Proxy → URL in result
+  Kaggle notebook → bootstrap() → OpenCode + Kaggle Jupyter Proxy (HTTP-probed) → URL
 """
 
 from __future__ import annotations
@@ -63,7 +63,6 @@ def bootstrap(
     nvidia_key = load_required_secret("NVIDIA_API_KEY")
     github_repo = load_secret("GITHUB_REPO")
     _ = load_secret("GITHUB_TOKEN")
-    _ = load_secret("CLOUDFLARE_TUNNEL_TOKEN")
     server_password = load_secret("OPENCODE_SERVER_PASSWORD") or ""
     server_username = load_secret("OPENCODE_SERVER_USERNAME") or "opencode"
 
@@ -167,6 +166,8 @@ def bootstrap(
         "message": "Access layer disabled",
         "local_port": opencode_port,
         "opencode_listening": True,
+        "proxy_url_generated": False,
+        "proxy_reachable": False,
         "authentication": "jupyter_session",
     }
 
@@ -174,21 +175,19 @@ def bootstrap(
         info = KaggleProxyAccess(opencode_port).resolve()
         access_info = info.to_dict(include_url=True)
         state["access"] = info
-        if info.available and info.url:
-            _log("Kaggle Jupyter Proxy: available")
-            _log(
-                format_workstation_banner(
-                    recovery=recovery.status.value,
-                    opencode_status="RUNNING",
-                    access=info,
-                )
+        _log(
+            format_workstation_banner(
+                recovery=recovery.status.value,
+                opencode_status="RUNNING" if info.opencode_listening else "NOT_RUNNING",
+                access=info,
             )
-        else:
-            _log(
-                f"OpenCode Web: NOT_ACCESSIBLE ({info.status}). "
-                "No fabricated URL. OpenCode may still be running locally."
+        )
+        if not info.available:
+            access_info["status"] = (
+                "OPENCODE_RUNNING_ACCESS_UNAVAILABLE"
+                if info.opencode_listening
+                else "OPENCODE_NOT_RUNNING"
             )
-            access_info["status"] = "OPENCODE_RUNNING_ACCESS_UNAVAILABLE"
 
     ckpt = CheckpointManager(policy or CheckpointPolicy())
     ckpt.set_baseline_fingerprint(paths.workspace)
@@ -245,6 +244,16 @@ def bootstrap(
         state["proc"] = new_p
         if wait_for_port("127.0.0.1", opencode_port, timeout=60.0):
             _log(f"Watchdog: OpenCode listening again (PID {new_p.pid})")
+            try:
+                reval = KaggleProxyAccess(opencode_port).resolve()
+                state["access"] = reval
+                _log(
+                    f"Watchdog: access revalidate status={reval.status} "
+                    f"reachable={reval.proxy_reachable} "
+                    f"url={reval.url_redacted or 'n/a'}"
+                )
+            except Exception as e:
+                _log(f"Watchdog: access revalidate failed: {type(e).__name__}")
         else:
             _log("Watchdog: OpenCode restarted but port not listening yet")
         return new_p
