@@ -94,17 +94,64 @@ class PersistentStore:
             d.mkdir(parents=True, exist_ok=True)
 
     def is_valid_workstation(self, path: Optional[Path] = None) -> bool:
-        """Return True if path looks like a complete workstation snapshot."""
+        """Return True if path is a complete, schema-compatible workstation."""
+        return self.validate_workstation(path).get("ok", False)
+
+    def validate_workstation(self, path: Optional[Path] = None) -> dict:
+        """Detailed workstation validation.
+
+        Returns dict with keys:
+          ok: bool
+          status: valid | incomplete | incompatible | invalid
+          message: human-readable reason
+        """
         base = Path(path) if path is not None else self.root
         marker = base / self.MARKER_FILE
         if not marker.exists():
-            return False
-        has_content = (
-            (base / "workspace").exists()
-            or (base / "state").exists()
-            or (base / "config").exists()
-        )
-        return has_content
+            return {
+                "ok": False,
+                "status": "incomplete",
+                "message": "missing workstation.json marker",
+            }
+        try:
+            data = json.loads(marker.read_text(encoding="utf-8"))
+        except Exception as e:
+            return {
+                "ok": False,
+                "status": "invalid",
+                "message": f"marker unreadable: {type(e).__name__}",
+            }
+        if not isinstance(data, dict):
+            return {"ok": False, "status": "invalid", "message": "marker is not an object"}
+        if data.get("kind") != "opencode-cloud-workstation":
+            return {
+                "ok": False,
+                "status": "incompatible",
+                "message": f"unexpected kind: {data.get('kind')!r}",
+            }
+        version = str(data.get("version", ""))
+        if not version.startswith("5."):
+            return {
+                "ok": False,
+                "status": "incompatible",
+                "message": f"incompatible schema version: {version!r}",
+            }
+        has_workspace = (base / "workspace").is_dir()
+        has_state = (base / "state").is_dir()
+        has_config = (base / "config").is_dir()
+        if not has_workspace:
+            return {
+                "ok": False,
+                "status": "incomplete",
+                "message": "missing workspace/ directory",
+            }
+        if not (has_state or has_config):
+            return {
+                "ok": False,
+                "status": "incomplete",
+                "message": "missing state/ and config/",
+            }
+        return {"ok": True, "status": "valid", "message": "workstation ok", "version": version}
 
     def write_marker(self, extra: Optional[dict] = None) -> None:
         data = {
@@ -163,10 +210,7 @@ class PersistentStore:
         workspace: Path,
         source: Optional[Path] = None,
     ) -> bool:
-        """Restore runtime paths from this store (or from source path).
-
-        Returns True if at least one component was restored.
-        """
+        """Restore runtime paths from this store (or from source path)."""
         base = Path(source) if source is not None else self.root
         restored_any = False
 
@@ -244,7 +288,6 @@ class KagglePersistence:
             raise ValueError("dataset_id must not include a version for upload")
         self.dataset_id = dataset_id
         self.working_root = Path(working_root)
-        # Outside PersistentStore root so recover_into can clear the store safely
         self.download_cache = self.working_root / "opencode_cloud_download"
         self.download_cache.mkdir(parents=True, exist_ok=True)
 
@@ -260,11 +303,7 @@ class KagglePersistence:
             ) from e
 
     def download(self, force: bool = False) -> tuple[bool, Optional[Path], str]:
-        """Download the Dataset via kagglehub.dataset_download.
-
-        Returns:
-            (success, local_path_or_None, message)
-        """
+        """Download the Dataset via kagglehub.dataset_download."""
         kh = self._kagglehub()
         try:
             try:
@@ -297,7 +336,6 @@ class KagglePersistence:
 
         kh = self._kagglehub()
         try:
-            # Official signature: dataset_upload(handle, local_dataset_dir, version_notes="")
             kh.dataset_upload(
                 self.dataset_id,
                 str(local_dir),
@@ -342,7 +380,6 @@ class KagglePersistence:
             )
 
         try:
-            # Snapshot download first so clearing the store cannot delete the source
             snapshot = self.working_root / "opencode_cloud_restore_snapshot"
             if snapshot.exists():
                 shutil.rmtree(snapshot)
@@ -390,7 +427,16 @@ class KagglePersistence:
     def publish_from_store(
         self, store: PersistentStore, version_notes: str = ""
     ) -> tuple[bool, str]:
-        """Stage local store and upload to Dataset."""
+        """Stage local store and upload to Dataset.
+
+        Refuses to publish if the store fails workstation validation.
+        """
+        validation = store.validate_workstation()
+        if not validation.get("ok"):
+            return (
+                False,
+                f"refusing to publish invalid workstation: {validation.get('message')}",
+            )
         staging = store.prepare_staging()
         return self.upload(staging, version_notes=version_notes)
 
