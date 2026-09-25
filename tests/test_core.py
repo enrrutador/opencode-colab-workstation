@@ -1,25 +1,18 @@
 """Significant tests for OpenCode Cloud Workstation architecture.
 
-Runnable outside Kaggle with mocks. No sys.path hacks when installed editable;
-path bootstrap only for direct script runs.
+Runnable outside Kaggle with mocks. Uses pyproject.toml pythonpath=src.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import subprocess
+import re
 import tempfile
-import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-# Ensure src is importable when running without install
-_SRC = Path(__file__).resolve().parents[1] / "src"
-if str(_SRC) not in os.sys.path:
-    os.sys.path.insert(0, str(_SRC))
 
 
 def test_no_colab_references_in_source():
@@ -46,9 +39,64 @@ def test_no_shell_true_in_source():
     offenders = []
     for path in root.rglob("*.py"):
         text = path.read_text(encoding="utf-8")
-        if "shell=True" in text:
+        if re.search(r"shell\s*=\s*True", text):
             offenders.append(str(path))
     assert not offenders, f"shell=True found in: {offenders}"
+
+
+def test_no_bash_c_or_pipe_to_shell_in_source():
+    """Reject bash -c, sh -c, curl|bash, wget|sh patterns in runtime/install code."""
+    root = Path(__file__).resolve().parents[1] / "src"
+    patterns = [
+        re.compile(r'["\']bash["\']\s*,\s*["\']-c["\']'),
+        re.compile(r'["\']sh["\']\s*,\s*["\']-c["\']'),
+        re.compile(r'["\']shell["\']\s*:\s*True|shell\s*=\s*True'),
+        re.compile(r'curl[^\n"\']*\|\s*(bash|sh)'),
+        re.compile(r'wget[^\n"\']*\|\s*(bash|sh)'),
+    ]
+    offenders = []
+    for path in root.rglob("*.py"):
+        text = path.read_text(encoding="utf-8")
+        for pat in patterns:
+            if pat.search(text):
+                offenders.append(f"{path}: {pat.pattern}")
+    assert not offenders, f"Unsafe shell patterns: {offenders}"
+
+
+def test_nvidia_api_key_not_in_subprocess_argv():
+    """fetch_models must not put the API key into subprocess arguments."""
+    from opencode_cloud import nvidia
+
+    captured_cmds: list[list] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        captured_cmds.append(list(cmd) if not isinstance(cmd, str) else [cmd])
+        m = MagicMock()
+        m.returncode = 1
+        m.stdout = ""
+        m.stderr = ""
+        return m
+
+    fake_key = "nvapi-SECRET-TEST-KEY-DO-NOT-LEAK"
+
+    with patch("subprocess.run", side_effect=fake_run):
+        with patch("opencode_cloud.nvidia.urllib.request.urlopen") as mock_open:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = b'{"data":[{"id":"model-a"}]}'
+            mock_resp.__enter__ = lambda s: mock_resp
+            mock_resp.__exit__ = lambda *a: None
+            mock_open.return_value = mock_resp
+            models = nvidia.fetch_models(fake_key)
+
+    assert models == ["model-a"]
+    for cmd in captured_cmds:
+        joined = " ".join(str(c) for c in cmd)
+        assert fake_key not in joined
+
+    cfg = nvidia.build_opencode_config(model="model-a")
+    dumped = json.dumps(cfg)
+    assert fake_key not in dumped
+    assert "{env:NVIDIA_API_KEY}" in dumped
 
 
 def test_persistent_store_never_writes_kaggle_datasets():
@@ -106,6 +154,55 @@ def test_prepare_staging_contains_marker():
         assert (staging / "workspace").exists()
 
 
+def test_validate_workstation_rejects_incomplete():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        from opencode_cloud.persistence import PersistentStore
+
+        store = PersistentStore(tmp / "opencode_cloud")
+        store.root.mkdir(parents=True)
+        (store.root / "workstation.json").write_text(
+            json.dumps({"kind": "opencode-cloud-workstation", "version": "5.0.0"}),
+            encoding="utf-8",
+        )
+        result = store.validate_workstation()
+        assert not result["ok"]
+        assert result["status"] in ("incomplete", "invalid")
+
+
+def test_validate_workstation_rejects_bad_kind():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        from opencode_cloud.persistence import PersistentStore
+
+        store = PersistentStore(tmp / "opencode_cloud")
+        store.ensure_structure()
+        (store.root / "workstation.json").write_text(
+            json.dumps({"kind": "something-else", "version": "5.0.0"}),
+            encoding="utf-8",
+        )
+        result = store.validate_workstation()
+        assert not result["ok"]
+        assert result["status"] == "incompatible"
+
+
+def test_publish_refuses_invalid_workstation():
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        from opencode_cloud.persistence import KagglePersistence, PersistentStore
+
+        store = PersistentStore(tmp / "opencode_cloud")
+        store.root.mkdir(parents=True)
+        (store.root / "workstation.json").write_text(
+            json.dumps({"kind": "opencode-cloud-workstation", "version": "5.0.0"}),
+            encoding="utf-8",
+        )
+        kp = KagglePersistence("owner/ds", tmp)
+        ok, msg = kp.publish_from_store(store)
+        assert not ok
+        assert "invalid" in msg.lower() or "refusing" in msg.lower()
+
+
 def test_kaggle_persistence_download_calls_dataset_download():
     with tempfile.TemporaryDirectory() as tmp:
         tmp = Path(tmp)
@@ -115,7 +212,8 @@ def test_kaggle_persistence_download_calls_dataset_download():
         fake_path = tmp / "downloaded"
         fake_path.mkdir()
         (fake_path / "workstation.json").write_text(
-            json.dumps({"kind": "opencode-cloud-workstation"}), encoding="utf-8"
+            json.dumps({"kind": "opencode-cloud-workstation", "version": "5.0.0"}),
+            encoding="utf-8",
         )
         (fake_path / "workspace").mkdir()
 
@@ -201,10 +299,12 @@ def test_recovery_restored_from_valid_dataset():
         download = tmp / "dl"
         download.mkdir()
         (download / "workstation.json").write_text(
-            json.dumps({"kind": "opencode-cloud-workstation"}), encoding="utf-8"
+            json.dumps({"kind": "opencode-cloud-workstation", "version": "5.0.0"}),
+            encoding="utf-8",
         )
         (download / "workspace").mkdir()
         (download / "workspace" / "code.py").write_text("print(1)", encoding="utf-8")
+        (download / "state").mkdir()
 
         kp = KagglePersistence("owner/ds", tmp)
         mock_kh = MagicMock()
@@ -247,30 +347,82 @@ def test_checkpoint_local_always_allowed():
     assert mgr.state.last_local_checkpoint > 0
 
 
-def test_checkpoint_cooldown_five_minutes():
+def test_checkpoint_no_change_no_publish():
+    from opencode_cloud.checkpoint import CheckpointManager, PublishReason
+
+    mgr = CheckpointManager()
+    should, reason = mgr.should_publish_remote(now=1_000_000.0)
+    assert not should
+    assert reason == PublishReason.NONE
+
+
+def test_checkpoint_significant_change_eligible_after_cooldown():
     from opencode_cloud.checkpoint import CheckpointManager, PublishReason
 
     mgr = CheckpointManager()
     mgr.mark_significant_change()
-    should, reason = mgr.should_publish_remote()
+    mgr.state.last_remote_publish = 0.0
+    should, reason = mgr.should_publish_remote(now=400.0)
     assert should
     assert reason == PublishReason.COOLDOWN_AND_CHANGES
 
-    mgr.record_remote_publish()
-    mgr.mark_significant_change()
-    should, reason = mgr.should_publish_remote()
-    assert not should
 
-
-def test_checkpoint_explicit_and_shutdown():
+def test_checkpoint_cooldown_blocks_rapid_publish():
     from opencode_cloud.checkpoint import CheckpointManager, PublishReason
 
     mgr = CheckpointManager()
-    mgr.record_remote_publish()
-    should, reason = mgr.should_publish_remote(reason=PublishReason.EXPLICIT)
+    mgr.record_remote_publish(now=1000.0)
+    mgr.mark_significant_change()
+    should, reason = mgr.should_publish_remote(now=1010.0)
+    assert not should
+    assert reason == PublishReason.NONE
+
+
+def test_checkpoint_explicit_and_shutdown_bypass_cooldown():
+    from opencode_cloud.checkpoint import CheckpointManager, PublishReason
+
+    mgr = CheckpointManager()
+    mgr.record_remote_publish(now=1000.0)
+    should, reason = mgr.should_publish_remote(
+        reason=PublishReason.EXPLICIT, now=1001.0
+    )
     assert should and reason == PublishReason.EXPLICIT
-    should, reason = mgr.should_publish_remote(reason=PublishReason.SHUTDOWN)
+    should, reason = mgr.should_publish_remote(
+        reason=PublishReason.SHUTDOWN, now=1001.0
+    )
     assert should and reason == PublishReason.SHUTDOWN
+
+
+def test_observe_workspace_detects_change():
+    from opencode_cloud.checkpoint import CheckpointManager
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp) / "ws"
+        ws.mkdir()
+        (ws / "a.txt").write_text("one", encoding="utf-8")
+
+        mgr = CheckpointManager()
+        assert not mgr.observe_workspace(ws)
+        assert not mgr.observe_workspace(ws)
+
+        (ws / "b.txt").write_text("two", encoding="utf-8")
+        assert mgr.observe_workspace(ws) is True
+        assert mgr.state.pending_significant_changes >= 1
+
+
+def test_workspace_fingerprint_stable():
+    from opencode_cloud.checkpoint import workspace_fingerprint
+
+    with tempfile.TemporaryDirectory() as tmp:
+        ws = Path(tmp)
+        (ws / "f.txt").write_text("x", encoding="utf-8")
+        a = workspace_fingerprint(ws)
+        b = workspace_fingerprint(ws)
+        assert a == b
+        (ws / "f.txt").write_text("yyyyyyyyyy", encoding="utf-8")
+        (ws / "g.txt").write_text("new", encoding="utf-8")
+        c = workspace_fingerprint(ws)
+        assert a != c
 
 
 def test_watchdog_restarts_on_death():
@@ -371,16 +523,6 @@ def test_github_validate_url():
         validate_repo_url("not-a-url")
 
 
-def test_ensure_node_idempotent_when_present():
-    from opencode_cloud.opencode import ensure_node
-
-    import shutil
-
-    if shutil.which("node"):
-        ver = ensure_node()
-        assert ver.startswith("v") or ver[0].isdigit()
-
-
 def test_write_opencode_config_incremental():
     from opencode_cloud.opencode import write_opencode_config
 
@@ -414,3 +556,13 @@ def test_runtime_paths_kaggle_layout():
     assert paths.working == Path("/kaggle/working")
     assert paths.cloud_root == Path("/kaggle/working/opencode_cloud")
     assert paths.workspace == Path("/kaggle/working/opencode_cloud/workspace")
+
+
+def test_ensure_node_idempotent_when_present():
+    from opencode_cloud.opencode import ensure_node
+
+    import shutil
+
+    if shutil.which("node"):
+        ver = ensure_node()
+        assert ver.startswith("v") or ver[0].isdigit()
