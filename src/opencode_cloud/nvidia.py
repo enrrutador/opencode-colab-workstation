@@ -1,41 +1,48 @@
 """NVIDIA NIM provider configuration.
 
-API key is never written to config, README, Dataset, or logs.
+API key is never written to config, README, Dataset, logs, argv, or temp files.
 Always referenced as {env:NVIDIA_API_KEY}.
+
+HTTP calls use urllib with the Authorization header kept only in memory.
 """
 
 from __future__ import annotations
 
 import json
-import subprocess
+import urllib.error
+import urllib.request
 from typing import Optional
 
 NVIDIA_BASE_URL = "https://integrate.api.nvidia.com/v1"
 
 
 def fetch_models(api_key: str) -> list[str]:
-    """Fetch available NVIDIA NIM models. Returns empty list on failure."""
+    """Fetch available NVIDIA NIM models via Python HTTP.
+
+    The API key stays in memory only (Authorization header).
+    It is never placed in subprocess argv, command lines, or files.
+    Returns empty list on failure (caller continues without model).
+    """
     if not api_key:
         return []
-    result = subprocess.run(
-        [
-            "curl",
-            "-sS",
-            "--max-time",
-            "30",
-            "-H",
-            f"Authorization: Bearer {api_key}",
-            f"{NVIDIA_BASE_URL}/models",
-        ],
-        capture_output=True,
-        text=True,
+    req = urllib.request.Request(
+        f"{NVIDIA_BASE_URL}/models",
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Accept": "application/json",
+            "User-Agent": "opencode-cloud-workstation/5.0",
+        },
+        method="GET",
     )
-    if result.returncode != 0:
-        return []
     try:
-        payload = json.loads(result.stdout)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+        payload = json.loads(body)
         return [item["id"] for item in payload.get("data", []) if item.get("id")]
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, ValueError, KeyError):
+        return []
     except Exception:
+        # Never re-raise with api_key in the message
         return []
 
 
