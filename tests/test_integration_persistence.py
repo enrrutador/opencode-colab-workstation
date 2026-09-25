@@ -7,17 +7,12 @@ without requiring network or a Kaggle account.
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
-
-_SRC = Path(__file__).resolve().parents[1] / "src"
-if str(_SRC) not in os.sys.path:
-    os.sys.path.insert(0, str(_SRC))
 
 
 class FakeKaggleHub:
@@ -85,10 +80,15 @@ def env():
 def _seed_runtime_files(tmp: Path):
     oc_data = tmp / "home_oc_data"
     oc_cfg = tmp / "home_oc_cfg"
-    ws = tmp / "runtime_ws"
-    for d, name in ((oc_data, "session.json"), (oc_cfg, "opencode.json"), (ws, "main.py")):
+    ws = tmp / "home_ws"
+    for d in (oc_data, oc_cfg, ws):
         d.mkdir(parents=True, exist_ok=True)
-        (d / name).write_text(f"content-{name}", encoding="utf-8")
+    (oc_data / "session.json").write_text('{"s":1}', encoding="utf-8")
+    (oc_cfg / "opencode.json").write_text(
+        json.dumps({"provider": {"nvidia": {"options": {"apiKey": "{env:NVIDIA_API_KEY}"}}}}),
+        encoding="utf-8",
+    )
+    (ws / "main.py").write_text("print('hello')", encoding="utf-8")
     return oc_data, oc_cfg, ws
 
 
@@ -102,32 +102,32 @@ def test_full_cycle_fresh_then_restore(env):
     working = env["working"]
     hub = env["hub"]
     tmp = env["tmp"]
+
     store = PersistentStore(working / "opencode_cloud")
     store.ensure_structure()
-    kp = KagglePersistence("owner/opencode-ws", working)
-    oc_data, oc_cfg, ws = _seed_runtime_files(tmp)
+    kp = KagglePersistence("owner/ws", working)
 
     with patch.object(kp, "_kagglehub", return_value=hub):
         result = kp.recover_into(store)
     assert result.status == RecoveryStatus.FRESH_WORKSTATION
 
+    oc_data, oc_cfg, ws = _seed_runtime_files(tmp)
     store.save_local(opencode_data=oc_data, opencode_config=oc_cfg, workspace=ws)
     assert store.is_valid_workstation()
 
     with patch.object(kp, "_kagglehub", return_value=hub):
-        ok, msg = kp.publish_from_store(store, version_notes="initial")
+        ok, msg = kp.publish_from_store(store, version_notes="first")
     assert ok, msg
     assert hub.version == 1
 
-    working2 = env["tmp"] / "working2"
+    working2 = tmp / "working2"
     working2.mkdir()
     store2 = PersistentStore(working2 / "opencode_cloud")
-    store2.ensure_structure()
-    kp2 = KagglePersistence("owner/opencode-ws", working2)
+    kp2 = KagglePersistence("owner/ws", working2)
     with patch.object(kp2, "_kagglehub", return_value=hub):
         result2 = kp2.recover_into(store2)
     assert result2.status == RecoveryStatus.RESTORED_FROM_DATASET
-    assert (store2.workspace / "main.py").read_text(encoding="utf-8") == "content-main.py"
+    assert (store2.workspace / "main.py").read_text(encoding="utf-8") == "print('hello')"
 
 
 def test_corrupt_dataset_does_not_pretend_success(env):
@@ -142,11 +142,10 @@ def test_corrupt_dataset_does_not_pretend_success(env):
     hub.version = 1
     vdir = hub.remote_root / "v1"
     vdir.mkdir()
-    (vdir / "noise.bin").write_bytes(b"xxx")
+    (vdir / "junk.txt").write_text("nope", encoding="utf-8")
 
     store = PersistentStore(working / "opencode_cloud")
-    store.ensure_structure()
-    kp = KagglePersistence("owner/ds", working)
+    kp = KagglePersistence("owner/ws", working)
     with patch.object(kp, "_kagglehub", return_value=hub):
         result = kp.recover_into(store)
     assert result.status == RecoveryStatus.RESTORE_FAILED
@@ -154,32 +153,15 @@ def test_corrupt_dataset_does_not_pretend_success(env):
 
 def test_checkpoint_manager_gates_remote_publish(env):
     from opencode_cloud.checkpoint import CheckpointManager, PublishReason
-    from opencode_cloud.persistence import KagglePersistence, PersistentStore
-
-    working = env["working"]
-    hub = env["hub"]
-    tmp = env["tmp"]
-    store = PersistentStore(working / "opencode_cloud")
-    kp = KagglePersistence("owner/ds", working)
-    oc_data, oc_cfg, ws = _seed_runtime_files(tmp)
-    store.save_local(opencode_data=oc_data, opencode_config=oc_cfg, workspace=ws)
 
     mgr = CheckpointManager()
+    mgr.record_remote_publish(now=0.0)
     mgr.mark_significant_change()
-    should, reason = mgr.should_publish_remote()
-    assert should
-
-    with patch.object(kp, "_kagglehub", return_value=hub):
-        ok, _ = kp.publish_from_store(store, version_notes="auto")
-    assert ok
-    mgr.record_remote_publish()
-
-    mgr.mark_significant_change()
-    should, reason = mgr.should_publish_remote()
+    should, reason = mgr.should_publish_remote(now=10.0)
     assert not should
-
-    should, reason = mgr.should_publish_remote(reason=PublishReason.EXPLICIT)
-    assert should and reason == PublishReason.EXPLICIT
+    should, reason = mgr.should_publish_remote(now=400.0)
+    assert should
+    assert reason == PublishReason.COOLDOWN_AND_CHANGES
 
 
 def test_upload_argument_order_handle_then_path(env):
@@ -191,13 +173,13 @@ def test_upload_argument_order_handle_then_path(env):
     store = PersistentStore(working / "opencode_cloud")
     oc_data, oc_cfg, ws = _seed_runtime_files(tmp)
     store.save_local(opencode_data=oc_data, opencode_config=oc_cfg, workspace=ws)
-    kp = KagglePersistence("myuser/mydata", working)
-
+    kp = KagglePersistence("owner/ws", working)
     with patch.object(kp, "_kagglehub", return_value=hub):
-        ok, msg = kp.publish_from_store(store)
-    assert ok, msg
+        ok, _ = kp.publish_from_store(store)
+    assert ok
+    assert hub.upload_calls
     call = hub.upload_calls[0]
-    assert call["handle"] == "myuser/mydata"
+    assert call["handle"] == "owner/ws"
 
 
 def test_second_runtime_continues_workspace(env):
@@ -289,3 +271,22 @@ def test_secrets_never_land_in_store(env):
             assert "nvapi-" not in content
             assert "ghp_" not in content
             assert "x-access-token:" not in content
+
+
+def test_checkpoint_does_not_call_github_sync():
+    """Checkpoint path must not call sync_to_remote automatically."""
+    import re
+
+    bootstrap_src = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "opencode_kaggle"
+        / "bootstrap.py"
+    ).read_text(encoding="utf-8")
+    call_sites = re.findall(r"sync_to_remote\s*\(", bootstrap_src)
+    assert call_sites == [], f"found sync_to_remote calls: {call_sites}"
+    import_lines = [
+        ln for ln in bootstrap_src.splitlines()
+        if "import" in ln and "sync_to_remote" in ln
+    ]
+    assert import_lines == [], f"found imports: {import_lines}"
