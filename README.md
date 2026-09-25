@@ -10,8 +10,8 @@ Un kernel Kaggle puede morir, reiniciarse o desaparecer. El trabajo del usuario 
 [![Version: v5](https://img.shields.io/badge/version-5.0.0-blue.svg)]()
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-yellow.svg)]()
 
-> Migración completa desde Colab. **Sin Google Colab, sin Google Drive, sin `shell=True`.**  
-> Runtime: **Kaggle Kernels** · Persistencia: **Kaggle Dataset** · Secretos: **Kaggle Secrets** · Código: **GitHub**
+> Arquitectura **Kaggle-only**. Sin Google Colab, sin Google Drive, sin `shell=True`, sin `bash -c` / `curl|bash`.  
+> Runtime: **Kaggle Kernels** · Persistencia: **Kaggle Dataset** · Secretos: **Kaggle Secrets** · Código: **GitHub** (versionado, separado del checkpoint)
 
 ---
 
@@ -128,6 +128,19 @@ Implementado en `opencode_kaggle.bootstrap.bootstrap()`:
 
 `CheckpointManager` decide *si*.  
 `KagglePersistence.publish_from_store()` ejecuta.
+
+### Significant change detection
+
+A workspace fingerprint (paths + sizes + mtimes) is compared before remote publish decisions.
+
+| Situation | Publish? |
+|---|---|
+| No workspace changes | No (unless EXPLICIT / SHUTDOWN) |
+| Significant change + ≥ 5 min since last publish | Yes (`COOLDOWN_AND_CHANGES`) |
+| Explicit checkpoint | Yes (bypasses cooldown) |
+| Ordered shutdown | Yes (bypasses cooldown) |
+
+GitHub sync is **never** triggered by checkpoints. Use `github_sync.sync_to_remote` explicitly for code versioning.
 
 ---
 
@@ -260,7 +273,7 @@ opencode-colab-workstation/
 ```
 
 Ambos `opencode_cloud` y `opencode_kaggle` son paquetes instalables.  
-En producción **no** se usa `sys.path.insert` (solo en tests para ejecución directa).
+En producción **no** se usa `sys.path.insert`.
 
 ---
 
@@ -276,9 +289,9 @@ pytest tests/ -v
 ruff check src/
 ```
 
-- **30 tests** (core + integración con `FakeKaggleHub`)
+- **40 tests** (core + integración con `FakeKaggleHub`)
 - Ejecutables **fuera de Kaggle** (mocks de `kagglehub`)
-- Verifican: sin Colab, sin `shell=True`, recovery, cooldown, secretos fuera del store, credenciales git borradas, watchdog sin publish
+- Verifican: sin Colab, sin `shell=True`, sin `bash -c` / pipe-to-shell, recovery, cooldown, fingerprint, secretos fuera del store, credenciales git borradas, watchdog sin publish, checkpoint sin GitHub auto-push
 
 ---
 
