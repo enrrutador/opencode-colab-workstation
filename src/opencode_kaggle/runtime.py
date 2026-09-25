@@ -1,8 +1,4 @@
-"""Kaggle-specific runtime adapter.
-
-This module provides utilities to detect and interact with Kaggle kernel
-environment without relying on Colab APIs.
-"""
+"""Kaggle-specific runtime detection and documentation helpers."""
 
 from __future__ import annotations
 
@@ -11,7 +7,6 @@ from pathlib import Path
 
 
 def is_kaggle_runtime() -> bool:
-    """Return True if running inside a Kaggle kernel."""
     return (
         os.path.exists("/kaggle")
         or bool(os.environ.get("KAGGLE_KERNEL_EXECUTION"))
@@ -20,34 +15,22 @@ def is_kaggle_runtime() -> bool:
 
 
 def get_runtime_paths() -> dict:
-    """Return canonical Kaggle paths."""
     working = Path("/kaggle/working")
-    input_root = Path("/kaggle/input")
-    dataset_root = Path("/kaggle/datasets")
-
     return {
         "working": working,
-        "input": input_root,
-        "datasets": dataset_root,
+        "input": Path("/kaggle/input"),
+        "datasets_readonly_hint": Path("/kaggle/datasets"),
         "home": Path.home(),
+        "cloud_root": working / "opencode_cloud",
     }
 
 
-def get_opencode_web_url(port: int = 4096) -> str:
-    """Return a best-effort URL for accessing OpenCode Web from Kaggle.
-
-    Kaggle does not provide a native proxy port like Colab. Public access to
-    Kaggle kernel ports is limited. The recommended approach is to expose
-    OpenCode Web via an external service or to use Kaggle's built-in
-    notebook interface with tunnelling. This function documents the
-    limitation.
-
-    Returns:
-        A documentation string explaining the limitation.
-    """
+def describe_opencode_web_access(port: int = 4096) -> str:
+    """Document access limitations. Does not invent public URLs or tunnels."""
     return (
-        f"Kaggle kernels do not expose public URLs for services running on "
-        f"port {port}. OpenCode Web is available locally at http://localhost:{port}. "
-        "If you need remote access, use a supported tunnelling solution or "
-        "access via the Kaggle UI."
+        f"OpenCode Web is running locally inside the Kaggle runtime at "
+        f"http://127.0.0.1:{port} (bound to 0.0.0.0:{port}). "
+        "Kaggle does not provide an official public URL or proxy for arbitrary "
+        "kernel ports. Access is local to the runtime; use the Kaggle notebook "
+        "environment or an external tunnel you control if remote access is required."
     )
