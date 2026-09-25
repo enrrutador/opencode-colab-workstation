@@ -1,13 +1,13 @@
-"""Watchdog for OpenCode process only.
+"""Process watchdog for OpenCode.
 
-Responsibility:
-  - Monitor the OpenCode process
+Responsibility (and only this):
+  - Monitor whether the OpenCode process is alive
   - If it dies: detect, call a REAL restart function, log the result
 
-Does NOT:
-  - Publish Kaggle Dataset
-  - Git push
-  - Act as the persistence system
+NOT responsible for:
+  - Persistence / Dataset publish
+  - GitHub commits
+  - Checkpoint policy
 """
 
 from __future__ import annotations
@@ -22,31 +22,29 @@ class Watchdog:
 
     def __init__(
         self,
-        check_interval: int = 30,
+        check_interval: float = 30.0,
         restart_fn: Optional[Callable[[], object]] = None,
         process_poll: Optional[Callable[[], Optional[int]]] = None,
     ):
         """
         Args:
-            check_interval: Seconds between checks.
             restart_fn: Callable that starts a new OpenCode process and returns
-                        something with a .poll() method (e.g. subprocess.Popen).
+                        an object with a .poll() method (e.g. subprocess.Popen).
                         MUST be a real restart, not a no-op.
-            process_poll: Callable returning None if alive, or exit code if dead.
+            process_poll: Optional alternate way to poll process liveness.
                           If not set, uses the last process returned by restart_fn.
         """
         self.check_interval = check_interval
         self.restart_fn = restart_fn
         self._process_poll = process_poll
-        self._process: Optional[object] = None
-        self._running = False
+        self._process = None
         self._thread: Optional[threading.Thread] = None
+        self._running = False
         self.restart_count = 0
         self.last_restart_ok: Optional[bool] = None
         self.last_error: Optional[str] = None
 
-    def set_process(self, proc: object) -> None:
-        """Set the process object currently being watched (must have .poll())."""
+    def set_process(self, proc) -> None:
         self._process = proc
 
     def set_restart_fn(self, fn: Callable[[], object]) -> None:
@@ -64,9 +62,11 @@ class Watchdog:
         self._thread.start()
 
     def stop(self) -> None:
+        """Idempotent: safe to call more than once."""
         self._running = False
-        if self._thread:
-            self._thread.join(timeout=5)
+        thr = self._thread
+        if thr is not None and thr.is_alive() and thr is not threading.current_thread():
+            thr.join(timeout=5)
 
     def _is_dead(self) -> bool:
         if self._process_poll is not None:
@@ -75,7 +75,7 @@ class Watchdog:
             return True
         poll = getattr(self._process, "poll", None)
         if poll is None:
-            return True
+            return False
         return poll() is not None
 
     def _loop(self) -> None:
