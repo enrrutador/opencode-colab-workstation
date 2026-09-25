@@ -1,7 +1,7 @@
 """Top-level bootstrap for OpenCode Cloud Workstation on Kaggle.
 
 Phone flow:
-  Kaggle notebook → bootstrap() → OpenCode + Cloudflare Tunnel → URL in result
+  Kaggle notebook → bootstrap() → OpenCode + Kaggle Jupyter Proxy → URL in result
 """
 
 from __future__ import annotations
@@ -13,7 +13,8 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from opencode_cloud.access import AccessLayer, wait_for_port
+from opencode_cloud.access import KaggleProxyAccess, format_workstation_banner, wait_for_port
+from opencode_cloud.ports import get_opencode_port
 from opencode_cloud.checkpoint import CheckpointManager, CheckpointPolicy, PublishReason
 from opencode_cloud.github_sync import configure_remote, init_repo
 from opencode_cloud.nvidia import fetch_models, select_model
@@ -37,12 +38,14 @@ def _log(msg: str) -> None:
 
 def bootstrap(
     dataset_id: Optional[str] = None,
-    opencode_port: int = 4096,
+    opencode_port: Optional[int] = None,
     policy: Optional[CheckpointPolicy] = None,
     *,
     enable_access_layer: bool = True,
 ) -> dict:
     """Bootstrap the workstation. Returns runtime info including web_access."""
+    if opencode_port is None:
+        opencode_port = get_opencode_port()
     if not is_kaggle():
         if os.environ.get("OPENCODE_CLOUD_ALLOW_LOCAL") != "1":
             raise RuntimeError(
@@ -60,7 +63,7 @@ def bootstrap(
     nvidia_key = load_required_secret("NVIDIA_API_KEY")
     github_repo = load_secret("GITHUB_REPO")
     _ = load_secret("GITHUB_TOKEN")
-    tunnel_token = load_secret("CLOUDFLARE_TUNNEL_TOKEN") or ""
+    _ = load_secret("CLOUDFLARE_TUNNEL_TOKEN")
     server_password = load_secret("OPENCODE_SERVER_PASSWORD") or ""
     server_username = load_secret("OPENCODE_SERVER_USERNAME") or "opencode"
 
@@ -130,11 +133,6 @@ def bootstrap(
         env["OPENCODE_SERVER_PASSWORD"] = server_password
         env["OPENCODE_SERVER_USERNAME"] = server_username
         _log("OpenCode basic auth: enabled (password from Secrets, not printed)")
-    elif enable_access_layer:
-        _log(
-            "WARNING: OPENCODE_SERVER_PASSWORD secret not set. "
-            "External URL would be unauthenticated — set OPENCODE_SERVER_PASSWORD in Kaggle Secrets."
-        )
 
     log_path = paths.logs / "opencode-web.log"
 
@@ -169,25 +167,27 @@ def bootstrap(
         "message": "Access layer disabled",
         "local_port": opencode_port,
         "opencode_listening": True,
-        "authentication": "opencode_basic_auth" if server_password else "none",
+        "authentication": "jupyter_session",
     }
 
     if enable_access_layer:
-        access = AccessLayer(
-            opencode_port,
-            tunnel_token=tunnel_token or None,
-            log_path=paths.logs / "cloudflared.log",
-        )
-        state["access"] = access
-        info = access.start(wait_url_timeout=60.0)
-        access_info = info.to_dict()
+        info = KaggleProxyAccess(opencode_port).resolve()
+        access_info = info.to_dict(include_url=True)
+        state["access"] = info
         if info.available and info.url:
-            _log(f"Phone access URL: {info.url}")
-            _log("Open that URL on your phone. Use OpenCode username/password from Secrets.")
-        elif info.available:
-            _log(f"Access layer: {info.status} — {info.message}")
+            _log("Kaggle Jupyter Proxy: available")
+            _log(
+                format_workstation_banner(
+                    recovery=recovery.status.value,
+                    opencode_status="RUNNING",
+                    access=info,
+                )
+            )
         else:
-            _log(f"Access layer unavailable: {info.status} — {info.message}")
+            _log(
+                f"OpenCode Web: NOT_ACCESSIBLE ({info.status}). "
+                "No fabricated URL. OpenCode may still be running locally."
+            )
             access_info["status"] = "OPENCODE_RUNNING_ACCESS_UNAVAILABLE"
 
     ckpt = CheckpointManager(policy or CheckpointPolicy())
@@ -273,16 +273,11 @@ def bootstrap(
     )
 
     def _on_shutdown(signum=None, frame=None):
-        _log("Shutdown: checkpoint → stop access → done")
+        _log("Shutdown: final Dataset checkpoint")
         try:
             scheduler.shutdown_checkpoint()
         except Exception as e:
             _log(f"Shutdown checkpoint error: {e}")
-        try:
-            if state.get("access"):
-                state["access"].stop()
-        except Exception as e:
-            _log(f"Access stop error: {e}")
 
     try:
         signal.signal(signal.SIGTERM, _on_shutdown)
