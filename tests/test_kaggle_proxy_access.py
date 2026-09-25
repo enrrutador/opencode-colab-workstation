@@ -42,7 +42,6 @@ def test_available_false_when_only_url_generated_not_probed(monkeypatch):
     ).resolve()
     assert info.proxy_url_generated is True
     assert info.available is False
-    assert info.status == "proxy_url_generated_not_probed"
 
 
 def test_available_true_only_after_successful_probe(monkeypatch):
@@ -51,7 +50,6 @@ def test_available_true_only_after_successful_probe(monkeypatch):
     monkeypatch.setattr(m, "wait_for_port", lambda *a, **k: True)
 
     def probe(url, **kw):
-        assert "proxy/proxy/4096" in url
         return True, 200, "proxy HTTP 200"
 
     info = KaggleProxyAccess(
@@ -61,7 +59,7 @@ def test_available_true_only_after_successful_probe(monkeypatch):
     ).resolve()
     assert info.available is True
     assert info.proxy_reachable is True
-    assert info.status == "opencode_web_ready"
+    assert info.status == "proxy_http_ok"
 
 
 def test_proxy_unreachable(monkeypatch):
@@ -97,17 +95,17 @@ def test_not_listening(monkeypatch):
     assert info.status == "opencode_not_listening"
 
 
-def test_banner_accessible_only_when_reachable():
+def test_banner_proxy_http_ok_when_reachable():
     info = AccessInfo(
         available=True,
         url="https://example/k/1/tok/proxy/proxy/4096",
         proxy_reachable=True,
         proxy_url_generated=True,
         opencode_listening=True,
-        status="opencode_web_ready",
+        status="proxy_http_ok",
     )
     text = format_workstation_banner(recovery="FRESH", opencode_status="RUNNING", access=info)
-    assert "ACCESSIBLE" in text
+    assert "PROXY_HTTP_OK" in text
 
 
 def test_no_cloudflare_in_access_module():

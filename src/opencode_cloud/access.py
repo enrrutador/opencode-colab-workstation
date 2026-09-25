@@ -1,6 +1,6 @@
 """Kaggle Jupyter Proxy access for OpenCode Web.
 
-Primary (only) mechanism:
+Mechanism:
   list_running_servers() → base_url →
   https://kkb-production.jupyter-proxy.kaggle.net/k/<kernel>/<token>/proxy/proxy/<PORT>
 
@@ -8,9 +8,10 @@ Semantics:
   opencode_listening  — TCP 127.0.0.1:PORT accepts connections
   proxy_url_generated — URL string built from Jupyter base_url
   proxy_reachable     — HTTP GET to the public proxy URL got a response
-  available           — proxy_reachable (NOT merely URL constructed)
+  available           — proxy_reachable (HTTP connectivity only)
+  status proxy_http_ok — HTTP probe passed; NOT a claim that OpenCode UI/WebSocket work
 
-JWT/token is ephemeral: show once to user; never Dataset/checkpoints/Git/logs.
+JWT/token is ephemeral: may show once to the user; never Dataset/checkpoints/Git.
 """
 
 from __future__ import annotations
@@ -242,15 +243,17 @@ class KaggleProxyAccess:
             proxy_url_generated=True,
             proxy_reachable=True,
             http_status=http_status,
-            status="opencode_web_ready",
+            status="proxy_http_ok",
             message=(
-                "Proxy HTTP probe succeeded. Open URL while this Kaggle session is active. "
-                "WebSocket/streaming not verified by this probe alone."
+                "Public proxy URL answered HTTP (connectivity check). "
+                "OpenCode Web UI, WebSocket and streaming are NOT verified by this probe; "
+                "validate those during the real Kaggle/browser test. "
+                "URL is session-scoped — do not persist it."
             ),
         )
 
 
-def format_workstation_banner(* , recovery: str, opencode_status: str, access: AccessInfo) -> str:
+def format_workstation_banner(*, recovery: str, opencode_status: str, access: AccessInfo) -> str:
     lines = [
         "========================================",
         "OpenCode Workstation",
@@ -259,11 +262,11 @@ def format_workstation_banner(* , recovery: str, opencode_status: str, access: A
         f"OpenCode: {opencode_status}",
     ]
     if access.available and access.url and access.proxy_reachable:
-        lines.append("OpenCode Web: ACCESSIBLE")
-        lines.append("Abrí esta URL desde tu teléfono:")
+        lines.append("OpenCode Web: PROXY_HTTP_OK")
+        lines.append("Proxy HTTP respondió. Abrí esta URL desde tu teléfono:")
         lines.append(access.url)
-        lines.append("Importante: URL del runtime actual; no es permanente.")
-        lines.append("Nota: el probe HTTP pasó; WebSocket/streaming requiere prueba manual.")
+        lines.append("Importante: URL del runtime actual (token de sesión); no la guardes.")
+        lines.append("Pendiente de validación real: UI OpenCode, WebSocket, streaming.")
     elif access.opencode_listening and access.proxy_url_generated and not access.proxy_reachable:
         lines.append("OpenCode Web: NOT_ACCESSIBLE")
         lines.append("OpenCode corre en el runtime; la URL del proxy se generó")
