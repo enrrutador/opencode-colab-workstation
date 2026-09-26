@@ -66,6 +66,10 @@ def bootstrap(
     server_password = load_secret("OPENCODE_SERVER_PASSWORD") or ""
     server_username = load_secret("OPENCODE_SERVER_USERNAME") or "opencode"
 
+    # Dataset handle: argument → Kaggle Secret → env
+    # (Kaggle Secrets are not auto-exported as environment variables)
+    if not dataset_id:
+        dataset_id = load_secret("OPENCODE_CLOUD_DATASET")
     try:
         did = resolve_dataset_id(dataset_id)
     except Exception as e:
