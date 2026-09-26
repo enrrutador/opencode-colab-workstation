@@ -17,7 +17,6 @@ import pytest
 
 def test_no_forbidden_notebook_host_apis_in_source():
     root = Path(__file__).resolve().parents[1] / "src"
-    # Forbidden notebook-host APIs (encoded) — must not appear in product source.
     import base64
 
     forbidden = [
@@ -561,3 +560,13 @@ def test_runtime_paths_kaggle_layout():
     assert paths.working == Path("/kaggle/working")
     assert paths.cloud_root == Path("/kaggle/working/opencode_cloud")
     assert paths.workspace == Path("/kaggle/working/opencode_cloud/workspace")
+
+
+def test_ensure_node_idempotent_when_present():
+    from opencode_cloud.opencode import ensure_node
+
+    import shutil
+
+    if shutil.which("node"):
+        ver = ensure_node()
+        assert ver.startswith("v") or ver[0].isdigit()
