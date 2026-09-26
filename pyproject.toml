@@ -1,19 +1,42 @@
 [project]
-name = "opencode-colab-workstation"
-version = "4.0.0"
-description = "OpenCode + Google Colab + Drive + NVIDIA NIM - Workstation persistente"
+name = "opencode-cloud-workstation"
+version = "5.0.0"
+description = "OpenCode Cloud Workstation — persistent OpenCode on ephemeral Kaggle runtimes"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["ruff>=0.8", "pyright>=1.1"]
+dev = ["ruff>=0.8", "pytest>=8.0"]
+kaggle = ["kagglehub>=0.2.9"]
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["src/opencode_cloud", "src/opencode_kaggle"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/opencode_cloud",
+  "src/opencode_kaggle",
+  "README.md",
+  "LICENSE",
+  "config",
+  "kaggle",
+  "scripts",
+  "tests",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
