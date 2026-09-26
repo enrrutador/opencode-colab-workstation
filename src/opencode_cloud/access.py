@@ -26,6 +26,19 @@ from typing import Any, Optional
 
 from .ports import DEFAULT_OPENCODE_PORT, get_opencode_port
 
+
+def is_port_open(
+    host: str,
+    port: int,
+    timeout: float = 1.0,
+) -> bool:
+    """Return True if a TCP port is open on the given host."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
 KAGGLE_JUPYTER_PROXY_HOST = "https://kkb-production.jupyter-proxy.kaggle.net"
 
 _JWT_LIKE = re.compile(r"eyJ[A-Za-z0-9_\-]{10,}\.[A-Za-z0-9_\-]*\.[A-Za-z0-9_\-]*")

@@ -13,7 +13,7 @@ import threading
 from pathlib import Path
 from typing import Optional
 
-from opencode_cloud.access import KaggleProxyAccess, format_workstation_banner, wait_for_port
+from opencode_cloud.access import KaggleProxyAccess, format_workstation_banner, is_port_open, wait_for_port
 from opencode_cloud.ports import get_opencode_port
 from opencode_cloud.checkpoint import CheckpointManager, CheckpointPolicy, PublishReason
 from opencode_cloud.github_sync import configure_remote, init_repo
@@ -266,6 +266,7 @@ def bootstrap(
         check_interval=30,
         restart_fn=restart_and_track,
         process_poll=lambda: state["proc"].poll(),
+        health_check=lambda: is_port_open("127.0.0.1", opencode_port, timeout=1.0),
     )
     watchdog.set_process(state["proc"])
     watchdog.start()

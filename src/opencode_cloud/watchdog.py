@@ -25,6 +25,7 @@ class Watchdog:
         check_interval: float = 30.0,
         restart_fn: Optional[Callable[[], object]] = None,
         process_poll: Optional[Callable[[], Optional[int]]] = None,
+        health_check: Optional[Callable[[], bool]] = None,
     ):
         """
         Args:
@@ -33,10 +34,14 @@ class Watchdog:
                         MUST be a real restart, not a no-op.
             process_poll: Optional alternate way to poll process liveness.
                           If not set, uses the last process returned by restart_fn.
+            health_check: Optional callback that returns True if the OpenCode
+                          service is actually reachable (e.g. TCP port open).
+                          When set, it takes precedence over process_poll.
         """
         self.check_interval = check_interval
         self.restart_fn = restart_fn
         self._process_poll = process_poll
+        self._health_check = health_check
         self._process = None
         self._thread: Optional[threading.Thread] = None
         self._running = False
@@ -49,6 +54,10 @@ class Watchdog:
 
     def set_restart_fn(self, fn: Callable[[], object]) -> None:
         self.restart_fn = fn
+
+    def set_health_check(self, fn: Callable[[], bool]) -> None:
+        """Set a health-check callback that returns True if the service is reachable."""
+        self._health_check = fn
 
     def start(self) -> None:
         if self._running:
@@ -69,6 +78,12 @@ class Watchdog:
             thr.join(timeout=5)
 
     def _is_dead(self) -> bool:
+        if self._health_check is not None:
+            try:
+                return not bool(self._health_check())
+            except Exception as e:
+                self.last_error = repr(e)
+                return True
         if self._process_poll is not None:
             return self._process_poll() is not None
         if self._process is None:
