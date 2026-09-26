@@ -1,6 +1,6 @@
 [project]
 name = "opencode-cloud-workstation"
-version = "5.0.1"
+version = "5.0.2"
 description = "OpenCode Cloud Workstation — persistent OpenCode on ephemeral Kaggle runtimes"
 readme = "README.md"
 license = { text = "MIT" }
@@ -12,26 +12,12 @@ dev = ["ruff>=0.8", "pytest>=8.0"]
 kaggle = ["kagglehub>=0.2.9"]
 
 [build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
 
-[tool.hatch.build.targets.wheel]
-only-include = ["opencode_cloud", "opencode_kaggle"]
-
-[tool.hatch.build.targets.wheel.sources]
-"src" = ""
-
-[tool.hatch.build.targets.sdist]
-include = [
-  "src/opencode_cloud",
-  "src/opencode_kaggle",
-  "README.md",
-  "LICENSE",
-  "config",
-  "kaggle",
-  "scripts",
-  "tests",
-]
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["opencode_cloud*", "opencode_kaggle*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
