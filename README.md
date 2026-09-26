@@ -10,8 +10,8 @@ Un kernel Kaggle puede morir, reiniciarse o desaparecer. El trabajo del usuario 
 [![Version: v5](https://img.shields.io/badge/version-5.0.0-blue.svg)]()
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-yellow.svg)]()
 
-> Arquitectura **Kaggle-only**. Sin Google Colab, sin Google Drive, sin `shell=True`, sin `bash -c` / `curl|bash`.  
-> Runtime: **Kaggle Kernels** · Persistencia: **Kaggle Dataset** · Secretos: **Kaggle Secrets** · Código: **GitHub** (versionado, separado del checkpoint)
+> Runtime: **Kaggle Kernels** · Persistencia: **Kaggle Dataset** · Secretos: **Kaggle Secrets** · Código: **GitHub** (versionado, separado del checkpoint).  
+> Sin `shell=True`, sin `bash -c` / `curl|bash`.
 
 ---
 
@@ -255,7 +255,7 @@ Shutdown es **idempotente**.
 
 ```python
 !pip install -q kagglehub
-!pip install -q git+https://github.com/enrrutador/opencode-colab-workstation.git@kaggle-migration
+!pip install -q git+https://github.com/enrrutador/opencode-workstation.git@main
 
 import opencode_kaggle.bootstrap as bs
 info = bs.bootstrap()
@@ -294,7 +294,7 @@ O abrir el notebook [`kaggle/Workstation.ipynb`](kaggle/Workstation.ipynb).
 ## Estructura del repositorio
 
 ```text
-opencode-colab-workstation/
+opencode-workstation/
 ├── src/
 │   ├── opencode_cloud/          # núcleo
 │   │   ├── access.py            # Kaggle Jupyter Proxy + HTTP probe
@@ -326,9 +326,8 @@ En producción **no** se usa `sys.path.insert`.
 ## Desarrollo y tests
 
 ```bash
-git clone https://github.com/enrrutador/opencode-colab-workstation.git
-cd opencode-colab-workstation
-git checkout kaggle-migration
+git clone https://github.com/enrrutador/opencode-workstation.git
+cd opencode-workstation
 
 pip install -e ".[dev]"
 pytest tests/ -v
@@ -337,7 +336,7 @@ ruff check src/
 
 - **67 tests** (core + proxy + scheduler + integración)
 - Ejecutables **fuera de Kaggle** (mocks de `kagglehub`)
-- Verifican: sin Colab, sin `shell=True`, sin `bash -c` / pipe-to-shell, recovery, cooldown, fingerprint, secretos fuera del store, credenciales git borradas, watchdog sin publish, checkpoint sin GitHub auto-push
+- Verifican: sin `shell=True`, sin `bash -c` / pipe-to-shell, recovery, cooldown, fingerprint, secretos fuera del store, credenciales git borradas, watchdog sin publish, checkpoint sin GitHub auto-push, solo proxy Kaggle
 
 ---
 
