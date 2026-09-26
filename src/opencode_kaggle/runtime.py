@@ -26,11 +26,11 @@ def get_runtime_paths() -> dict:
 
 
 def describe_opencode_web_access(port: int = 4096) -> str:
-    """Legacy string. Prefer AccessInfo from KaggleProxyAccess.resolve()."""
+    """Short description; prefer AccessInfo from KaggleProxyAccess.resolve()."""
     return (
         f"OpenCode listens on 127.0.0.1:{port}. "
         "External access uses Kaggle Jupyter Proxy "
         "(kkb-production.jupyter-proxy.kaggle.net/.../proxy/proxy/<PORT>). "
         "bootstrap() builds the URL from list_running_servers() and HTTP-probes it "
-        "before marking ACCESSIBLE."
+        "before marking available."
     )

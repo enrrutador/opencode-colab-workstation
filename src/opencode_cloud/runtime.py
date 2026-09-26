@@ -1,6 +1,4 @@
-"""Runtime detection and path management for ephemeral cloud runtimes.
-
-Free of any Colab-specific dependencies.
+"""Runtime detection and path management for ephemeral Kaggle (and local) runtimes.
 """
 
 from __future__ import annotations
@@ -18,85 +16,67 @@ class RuntimePaths:
 
     working: Path
     home: Path
+    cloud_root: Path
+    workspace: Path
     opencode_data: Path
     opencode_config: Path
-    workspace: Path
+    checkpoints: Path
+    metadata: Path
     logs: Path
-    temp: Path
-    cloud_root: Path  # /kaggle/working/opencode_cloud
+    staging: Path
 
 
 def detect_runtime() -> str:
-    """Detect the current runtime platform.
-
-    Returns:
-        'kaggle' if running in Kaggle, otherwise 'local'.
-    """
-    if (
-        os.path.exists("/kaggle")
-        or os.environ.get("KAGGLE_KERNEL_EXECUTION")
-        or os.environ.get("KAGGLE_CONTAINER_TYPE")
-    ):
+    if is_kaggle():
         return "kaggle"
     return "local"
 
 
 def get_paths(runtime: Optional[str] = None) -> RuntimePaths:
-    """Build RuntimePaths for the given runtime."""
     runtime = runtime or detect_runtime()
-    home = Path.home()
-
     if runtime == "kaggle":
         working = Path("/kaggle/working")
+        home = Path.home()
     else:
         working = Path(os.environ.get("OPENCODE_CLOUD_WORKDIR", "/tmp/opencode-cloud"))
+        home = Path.home()
 
     cloud_root = working / "opencode_cloud"
-    opencode_data = home / ".local" / "share" / "opencode"
-    opencode_config = home / ".config" / "opencode"
-    workspace = cloud_root / "workspace"
-    logs = cloud_root / "logs"
-    temp = cloud_root / "tmp"
-
     return RuntimePaths(
         working=working,
         home=home,
-        opencode_data=opencode_data,
-        opencode_config=opencode_config,
-        workspace=workspace,
-        logs=logs,
-        temp=temp,
         cloud_root=cloud_root,
+        workspace=cloud_root / "workspace",
+        opencode_data=cloud_root / "state" / "opencode-data",
+        opencode_config=cloud_root / "config",
+        checkpoints=cloud_root / "checkpoints",
+        metadata=cloud_root / "metadata",
+        logs=cloud_root / "logs",
+        staging=cloud_root / "staging",
     )
 
 
 def ensure_dirs(paths: RuntimePaths) -> None:
-    """Create runtime directories idempotently."""
-    for d in (
-        paths.working,
+    for p in (
         paths.cloud_root,
         paths.workspace,
-        paths.logs,
-        paths.temp,
         paths.opencode_data,
         paths.opencode_config,
+        paths.checkpoints,
+        paths.metadata,
+        paths.logs,
+        paths.staging,
     ):
-        Path(d).mkdir(parents=True, exist_ok=True)
+        p.mkdir(parents=True, exist_ok=True)
 
 
 def is_kaggle() -> bool:
-    return detect_runtime() == "kaggle"
+    return (
+        os.path.exists("/kaggle")
+        or bool(os.environ.get("KAGGLE_KERNEL_EXECUTION"))
+        or bool(os.environ.get("KAGGLE_CONTAINER_TYPE"))
+    )
 
 
-def is_local() -> bool:
-    return detect_runtime() == "local"
-
-
-def platform_info() -> dict:
-    return {
-        "runtime": detect_runtime(),
-        "platform": platform.system(),
-        "release": platform.release(),
-        "machine": platform.machine(),
-        "python": platform.python_version(),
-    }
+def is_linux() -> bool:
+    return platform.system().lower() == "linux"

@@ -6,12 +6,13 @@ import re
 from pathlib import Path
 
 
-def test_no_access_cloudflare_module():
+def test_no_external_tunnel_modules():
     root = Path(__file__).resolve().parents[1] / "src" / "opencode_cloud"
     assert not (root / "access_cloudflare.py").exists()
+    assert not (root / "access_ngrok.py").exists()
 
 
-def test_no_cloudflare_imports_in_src():
+def test_no_external_tunnel_imports_in_src():
     root = Path(__file__).resolve().parents[1] / "src"
     offenders = []
     for path in root.rglob("*.py"):
@@ -19,6 +20,8 @@ def test_no_cloudflare_imports_in_src():
         if "access_cloudflare" in text or "CloudflareAccessLayer" in text:
             offenders.append(str(path))
         if re.search(r"allow_cloudflare_fallback", text):
+            offenders.append(str(path))
+        if "ngrok" in text.lower() and "test" not in path.name:
             offenders.append(str(path))
     assert not offenders, offenders
 

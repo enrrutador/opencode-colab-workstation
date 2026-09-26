@@ -1,4 +1,4 @@
-"""Unit tests for Kaggle Jupyter Proxy access (no Cloudflare)."""
+"""Unit tests for Kaggle Jupyter Proxy access."""
 
 from __future__ import annotations
 
@@ -108,9 +108,11 @@ def test_banner_proxy_http_ok_when_reachable():
     assert "PROXY_HTTP_OK" in text
 
 
-def test_no_cloudflare_in_access_module():
+def test_access_module_is_kaggle_proxy_only():
     from pathlib import Path
 
     text = (Path(__file__).resolve().parents[1] / "src/opencode_cloud/access.py").read_text()
-    assert "cloudflare" not in text.lower()
+    assert "KaggleProxyAccess" in text
+    assert "jupyter-proxy.kaggle.net" in text or "KAGGLE_JUPYTER_PROXY" in text
     assert "cloudflared" not in text.lower()
+    assert "ngrok" not in text.lower()
